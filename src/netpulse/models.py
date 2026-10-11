@@ -1,7 +1,7 @@
 """Domain models: monitored targets and check results."""
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl
@@ -71,3 +71,17 @@ class CheckResult:
     ssl_days_left: int | None = None
     error: str | None = None
     checked_at: datetime = field(default_factory=_utcnow)
+
+
+@dataclass(frozen=True, slots=True)
+class Incident:
+    """A period during which a target was down. `ended_at` is None while it is ongoing."""
+
+    id: int
+    target: str
+    started_at: datetime
+    ended_at: datetime | None
+    first_error: str | None
+
+    def duration(self, now: datetime) -> timedelta:
+        return max(timedelta(0), (self.ended_at or now) - self.started_at)

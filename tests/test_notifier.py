@@ -1,10 +1,11 @@
 import json
+from datetime import timedelta
 
 import httpx
 import pytest
 
 from netpulse.models import CheckResult, HttpTarget
-from netpulse.notifier import TelegramNotifier, format_alert
+from netpulse.notifier import TelegramNotifier, format_alert, format_duration
 from netpulse.state import Event
 
 TARGET = HttpTarget(name="API", url="https://api.example.com")
@@ -58,3 +59,33 @@ async def test_http_error_status_is_swallowed(caplog: pytest.LogCaptureFixture) 
 
     assert "HTTP 401" in caplog.text
     assert "SECRET-TOKEN" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("seconds", "expected"),
+    [
+        (0, "0s"),
+        (59, "59s"),
+        (61, "1m 1s"),
+        (3599, "59m 59s"),
+        (3600, "1h 0m"),
+        (3 * 3600 + 25 * 60 + 59, "3h 25m"),
+        (86_400, "1d 0h"),
+        (90_000, "1d 1h"),
+        (-5, "0s"),
+    ],
+)
+def test_format_duration(seconds: int, expected: str) -> None:
+    assert format_duration(timedelta(seconds=seconds)) == expected
+
+
+def test_recovery_alert_reports_the_downtime() -> None:
+    result = CheckResult("API", ok=True, latency_ms=50.0)
+    text = format_alert(TARGET, result, Event.RECOVERED, downtime=timedelta(minutes=5, seconds=12))
+    assert "back UP" in text
+    assert "Downtime: 5m 12s" in text
+
+
+def test_recovery_alert_without_a_known_incident_has_no_downtime_line() -> None:
+    text = format_alert(TARGET, CheckResult("API", ok=True), Event.RECOVERED)
+    assert "Downtime" not in text

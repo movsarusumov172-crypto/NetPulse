@@ -54,6 +54,14 @@
     .error { font-size: 13px; color: #fca5a5; background: rgba(239, 68, 68, .08); border-radius: 8px; padding: 8px 10px; word-break: break-word; }
     .foot { color: var(--muted); font-size: 12px; display: flex; justify-content: space-between; gap: 8px; }
     .offline { color: var(--down); }
+    h2 { font-size: 18px; }
+    .incidents { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 8px; }
+    .incident { background: var(--surface); border: 1px solid var(--line); border-left: 4px solid var(--line); border-radius: 12px; padding: 12px 16px; display: grid; gap: 4px; }
+    .incident.ongoing { border-left-color: var(--down); }
+    .incident .row { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+    .incident .when, .empty { color: var(--muted); font-size: 13px; }
+    .incident .length { font-weight: 600; font-size: 14px; }
+    .incident .length.ongoing { color: var(--down); }
     .badge { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; margin-right: 6px; }
   </style>
 </head>
@@ -72,6 +80,10 @@
     </header>
     <div id="banner" class="banner">Получаем статус…</div>
     <div id="grid" class="grid"></div>
+    <section>
+      <h2>Последние инциденты</h2>
+      <ul id="incidents" class="incidents"></ul>
+    </section>
   </div>
 
   <script>
@@ -87,14 +99,53 @@
       return element;
     }
 
-    function ago(iso) {
-      if (!iso) return "—";
-      const seconds = Math.max(0, Math.round((Date.now() - new Date(iso)) / 1000));
+    function duration(totalSeconds) {
+      const seconds = Math.max(0, Math.round(totalSeconds));
       if (seconds < 60) return `${seconds} с`;
       const minutes = Math.floor(seconds / 60);
       if (minutes < 60) return `${minutes} мин`;
       const hours = Math.floor(minutes / 60);
-      return `${hours} ч ${minutes % 60} мин`;
+      if (hours < 24) return `${hours} ч ${minutes % 60} мин`;
+      return `${Math.floor(hours / 24)} д ${hours % 24} ч`;
+    }
+
+    function ago(iso) {
+      if (!iso) return "—";
+      return duration((Date.now() - new Date(iso)) / 1000);
+    }
+
+    function dateTime(iso) {
+      return new Date(iso).toLocaleString("ru-RU", {
+        day: "numeric", month: "short", hour: "2-digit", minute: "2-digit",
+      });
+    }
+
+    function incident(item) {
+      const box = el("li", item.ongoing ? "incident ongoing" : "incident");
+      const top = el("div", "row");
+      top.append(
+        el("strong", null, item.target),
+        el("span", item.ongoing ? "length ongoing" : "length",
+          item.ongoing ? `идёт ${duration(item.duration_seconds)}` : `длился ${duration(item.duration_seconds)}`),
+      );
+      const end = item.ended_at ? ` — ${dateTime(item.ended_at)}` : "";
+      box.append(top, el("div", "when", `${dateTime(item.started_at)}${end}`));
+      if (item.first_error) box.append(el("div", "error", item.first_error));
+      return box;
+    }
+
+    async function refreshIncidents() {
+      const list = document.getElementById("incidents");
+      try {
+        const response = await fetch("/api/incidents?limit=10", { cache: "no-store" });
+        if (!response.ok) throw new Error(String(response.status));
+        const data = await response.json();
+        list.replaceChildren(...(data.incidents.length
+          ? data.incidents.map(incident)
+          : [el("li", "empty", "Инцидентов пока не было")]));
+      } catch {
+        list.replaceChildren(el("li", "empty", "Не удалось загрузить инциденты"));
+      }
     }
 
     function stat(label, value, className) {
@@ -166,7 +217,9 @@
     }
 
     refresh();
+    refreshIncidents();
     setInterval(refresh, 5000);
+    setInterval(refreshIncidents, 15000);
   </script>
 </body>
 </html>

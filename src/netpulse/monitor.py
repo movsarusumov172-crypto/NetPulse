@@ -4,6 +4,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from datetime import timedelta
 from functools import partial
 
 import httpx
@@ -77,10 +78,23 @@ class Monitor:
             self._board.record(result)
         event = self._tracker.update(result)
         if event is not None:
+            downtime = self._record_incident(target, result, event)
             self._log_event(target, result, event)
             if self._notifier is not None:
-                await self._notifier.send(format_alert(target, result, event))
+                await self._notifier.send(format_alert(target, result, event, downtime=downtime))
         return result
+
+    def _record_incident(
+        self, target: Target, result: CheckResult, event: Event
+    ) -> timedelta | None:
+        """Open or close the target's incident. Returns the downtime when one just ended."""
+        if event is Event.WENT_DOWN:
+            self._storage.open_incident(target.name, result.checked_at, result.error)
+        elif event is Event.RECOVERED:
+            incident = self._storage.close_incident(target.name, result.checked_at)
+            if incident is not None:
+                return incident.duration(result.checked_at)
+        return None
 
     async def _attempt(self, target: Target) -> CheckResult:
         # The slot is held per attempt, not per cycle, so retry backoff never blocks other checks.
@@ -99,11 +113,11 @@ async def run_monitor(settings: Settings) -> None:
     """Wire up real dependencies and monitor until cancelled."""
     metrics = Metrics()
     board = StatusBoard(list(settings.targets), settings.interval)
-    server = StatusServer(metrics.registry, board)
-    port = server.start(settings.metrics_host, settings.metrics_port)
-    logger.info("Status page on http://%s:%s/ (metrics: /metrics)", settings.metrics_host, port)
-    try:
-        with Storage(settings.database) as storage:
+    with Storage(settings.database) as storage:  # opens (and migrates) the database first
+        server = StatusServer(metrics.registry, board, settings.database)
+        port = server.start(settings.metrics_host, settings.metrics_port)
+        logger.info("Status page on http://%s:%s/ (metrics: /metrics)", settings.metrics_host, port)
+        try:
             async with (
                 httpx.AsyncClient(follow_redirects=True, timeout=None) as check_client,
                 httpx.AsyncClient(timeout=_ALERT_TIMEOUT) as alert_client,
@@ -121,5 +135,5 @@ async def run_monitor(settings: Settings) -> None:
                     "Monitoring %d targets every %gs", len(settings.targets), settings.interval
                 )
                 await monitor.run()
-    finally:
-        server.stop()
+        finally:
+            server.stop()

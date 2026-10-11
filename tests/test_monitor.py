@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -128,3 +129,56 @@ async def test_concurrency_is_limited_by_semaphore(storage: Storage) -> None:
     await asyncio.gather(*(monitor.check_target(t) for t in targets))
 
     assert peak == 3
+
+
+class TimedCheck:
+    """Returns scripted (ok, checked_at) outcomes, one per attempt; the last one repeats."""
+
+    def __init__(self, *outcomes: tuple[bool, datetime]) -> None:
+        self.outcomes = outcomes
+        self.attempts = 0
+
+    async def __call__(self, target: Target) -> CheckResult:
+        ok, at = self.outcomes[min(self.attempts, len(self.outcomes) - 1)]
+        self.attempts += 1
+        return CheckResult(target.name, ok=ok, checked_at=at, error=None if ok else "boom")
+
+
+T0 = datetime(2030, 1, 1, tzinfo=UTC)
+
+
+async def test_incident_is_opened_when_down_and_closed_when_recovered(storage: Storage) -> None:
+    notifier = FakeNotifier()
+    down_at, up_at = T0, T0 + timedelta(minutes=5, seconds=12)
+    check = TimedCheck((False, down_at), (False, down_at + timedelta(minutes=1)), (True, up_at))
+    monitor = make_monitor(storage, check, notifier, retries=0)
+
+    await monitor.check_target(TARGET)
+    [opened] = storage.incidents()
+    assert (opened.started_at, opened.ended_at, opened.first_error) == (down_at, None, "boom")
+
+    await monitor.check_target(TARGET)  # still down: same incident, no new row
+    assert len(storage.incidents()) == 1
+
+    await monitor.check_target(TARGET)
+    [closed] = storage.incidents()
+    assert closed.ended_at == up_at
+    assert "Downtime: 5m 12s" in notifier.messages[-1]
+
+
+async def test_incident_that_survived_a_restart_is_closed_on_recovery(storage: Storage) -> None:
+    check_down = TimedCheck((False, T0))
+    await make_monitor(storage, check_down, FakeNotifier(), retries=0).check_target(TARGET)
+
+    notifier = FakeNotifier()  # a restarted monitor on the same database
+    check_up = TimedCheck((True, T0 + timedelta(hours=2)))
+    await make_monitor(storage, check_up, notifier, retries=0).check_target(TARGET)
+
+    [incident] = storage.incidents()
+    assert incident.ended_at == T0 + timedelta(hours=2)
+    assert "Downtime: 2h 0m" in notifier.messages[0]
+
+
+async def test_failure_absorbed_by_retry_leaves_no_incident(storage: Storage) -> None:
+    await make_monitor(storage, ScriptedCheck(False, True), FakeNotifier()).check_target(TARGET)
+    assert storage.incidents() == []

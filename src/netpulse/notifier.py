@@ -2,6 +2,7 @@
 
 import logging
 import os
+from datetime import timedelta
 from typing import Protocol
 
 import httpx
@@ -19,11 +20,34 @@ class Notifier(Protocol):
     async def send(self, text: str) -> None: ...
 
 
-def format_alert(target: Target, result: CheckResult, event: Event) -> str:
+def format_duration(delta: timedelta) -> str:
+    """Compact human duration with the two most significant units, e.g. `5m 12s`, `2h 5m`."""
+    days, rest = divmod(max(0, int(delta.total_seconds())), 86_400)
+    hours, rest = divmod(rest, 3_600)
+    minutes, seconds = divmod(rest, 60)
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {seconds}s"
+    return f"{seconds}s"
+
+
+def format_alert(
+    target: Target,
+    result: CheckResult,
+    event: Event,
+    *,
+    downtime: timedelta | None = None,
+) -> str:
     if event is Event.WENT_DOWN:
         return f"\N{LARGE RED CIRCLE} {target.name} is DOWN\n{target.address}\n{result.error}"
     latency = f" ({result.latency_ms:.0f} ms)" if result.latency_ms is not None else ""
-    return f"\N{LARGE GREEN CIRCLE} {target.name} is back UP{latency}\n{target.address}"
+    text = f"\N{LARGE GREEN CIRCLE} {target.name} is back UP{latency}\n{target.address}"
+    if downtime is not None:
+        text += f"\nDowntime: {format_duration(downtime)}"
+    return text
 
 
 class TelegramNotifier:

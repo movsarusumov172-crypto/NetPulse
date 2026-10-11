@@ -1,6 +1,7 @@
 """Status page: latest results in memory and the HTTP server for page, JSON and metrics."""
 
 import json
+import logging
 import threading
 from collections import deque
 from dataclasses import dataclass, field
@@ -8,13 +9,20 @@ from datetime import UTC, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
+from pathlib import Path
 from typing import Any, cast
+from urllib.parse import parse_qs, urlsplit
 
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, generate_latest
 
-from netpulse.models import CheckResult, Target
+from netpulse.models import CheckResult, Incident, Target
+from netpulse.storage import Storage
+
+logger = logging.getLogger(__name__)
 
 HISTORY_SIZE = 30
+INCIDENTS_DEFAULT_LIMIT = 20
+INCIDENTS_MAX_LIMIT = 100
 
 
 @dataclass
@@ -47,6 +55,10 @@ class StatusBoard:
             status.successes += result.ok
             status.history.append(result)
 
+    def target_names(self) -> list[str]:
+        with self._lock:
+            return list(self._statuses)
+
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             targets = [_describe(status) for status in self._statuses.values()]
@@ -77,34 +89,98 @@ def _describe(status: _TargetStatus) -> dict[str, Any]:
     }
 
 
+class _BadRequest(Exception):
+    """A malformed query parameter; the message is returned to the client."""
+
+
 class _Server(ThreadingHTTPServer):
     daemon_threads = True
 
     def __init__(
-        self, address: tuple[str, int], registry: CollectorRegistry, board: StatusBoard
+        self,
+        address: tuple[str, int],
+        registry: CollectorRegistry,
+        board: StatusBoard,
+        db_path: Path | None,
     ) -> None:
         super().__init__(address, _Handler)
         self.registry = registry
         self.board = board
+        self.db_path = db_path
         self.page = files("netpulse").joinpath("static/dashboard.html").read_bytes()
+
+
+def _incident_json(incident: Incident, now: datetime) -> dict[str, Any]:
+    return {
+        "id": incident.id,
+        "target": incident.target,
+        "started_at": incident.started_at.isoformat(),
+        "ended_at": incident.ended_at.isoformat() if incident.ended_at else None,
+        "ongoing": incident.ended_at is None,
+        "duration_seconds": int(incident.duration(now).total_seconds()),
+        "first_error": incident.first_error,
+    }
+
+
+def _int_param(query: dict[str, list[str]], name: str, default: int, low: int, high: int) -> int:
+    raw = query.get(name, [None])[0]
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        value = low - 1
+    if not low <= value <= high:
+        raise _BadRequest(f"{name} must be an integer from {low} to {high}")
+    return value
 
 
 class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
+        url = urlsplit(self.path)
+        try:
+            self._route(url.path, parse_qs(url.query))
+        except _BadRequest as exc:
+            self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+        except Exception:
+            logger.exception("Request to %s failed", url.path)
+            self._send_json({"error": "internal error"}, HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def _route(self, path: str, query: dict[str, list[str]]) -> None:
         server = cast(_Server, self.server)
-        path = self.path.split("?", 1)[0]
         if path == "/metrics":
             self._send(generate_latest(server.registry), CONTENT_TYPE_LATEST)
         elif path == "/api/status":
-            body = json.dumps(server.board.snapshot(), ensure_ascii=False).encode()
-            self._send(body, "application/json; charset=utf-8")
+            self._send_json(server.board.snapshot())
+        elif path == "/api/incidents":
+            self._incidents(server, query)
         elif path == "/":
             self._send(server.page, "text/html; charset=utf-8")
         else:
-            self.send_error(HTTPStatus.NOT_FOUND)
+            self._send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
-    def _send(self, body: bytes, content_type: str) -> None:
-        self.send_response(HTTPStatus.OK)
+    def _incidents(self, server: _Server, query: dict[str, list[str]]) -> None:
+        limit = _int_param(query, "limit", INCIDENTS_DEFAULT_LIMIT, 1, INCIDENTS_MAX_LIMIT)
+        names = server.board.target_names()
+        target = query.get("target", [None])[0]
+        if target is not None:
+            if target not in names:
+                self._send_json({"error": "unknown target"}, HTTPStatus.NOT_FOUND)
+                return
+            names = [target]
+        incidents: list[Incident] = []
+        if server.db_path is not None:
+            with Storage(server.db_path, readonly=True) as storage:
+                incidents = storage.incidents(limit=limit, targets=names)
+        now = datetime.now(UTC)
+        self._send_json({"incidents": [_incident_json(item, now) for item in incidents]})
+
+    def _send_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
+        body = json.dumps(payload, ensure_ascii=False).encode()
+        self._send(body, "application/json; charset=utf-8", status)
+
+    def _send(self, body: bytes, content_type: str, status: HTTPStatus = HTTPStatus.OK) -> None:
+        self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
@@ -116,17 +192,26 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 class StatusServer:
-    """Serves `/` (status page), `/api/status` (JSON) and `/metrics` (Prometheus)."""
+    """Serves `/` (status page), `/api/*` (JSON) and `/metrics` (Prometheus).
 
-    def __init__(self, registry: CollectorRegistry, board: StatusBoard) -> None:
+    `db_path` is where history endpoints read from, each request through its own
+    read-only connection; without it they return empty data.
+    """
+
+    def __init__(
+        self, registry: CollectorRegistry, board: StatusBoard, db_path: Path | None = None
+    ) -> None:
         self._registry = registry
         self._board = board
+        self._db_path = db_path
         self._server: _Server | None = None
 
     def start(self, host: str, port: int) -> int:
         """Start the server in a background thread. Returns the bound port."""
-        self._server = _Server((host, port), self._registry, self._board)
-        threading.Thread(target=self._server.serve_forever, daemon=True).start()
+        self._server = _Server((host, port), self._registry, self._board, self._db_path)
+        threading.Thread(
+            target=self._server.serve_forever, kwargs={"poll_interval": 0.1}, daemon=True
+        ).start()
         return int(self._server.server_port)
 
     def stop(self) -> None:
