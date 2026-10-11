@@ -27,7 +27,7 @@ targets:
     )
     web, db, dns = settings.targets
     assert settings.interval == 15
-    assert settings.retries == 3  # default
+    assert settings.retries == 3  # значение по умолчанию
     assert isinstance(web, HttpTarget)
     assert web.expected_status == 204
     assert isinstance(db, TcpTarget)
@@ -42,12 +42,12 @@ def test_bundled_config_is_valid() -> None:
     "body",
     [
         "targets: []",
-        "targets: [{name: db, type: tcp, host: db.internal}]",  # missing port
-        "targets: [{name: x, type: ftp, host: h}]",  # unknown type
+        "targets: [{name: db, type: tcp, host: db.internal}]",  # нет порта
+        "targets: [{name: x, type: ftp, host: h}]",  # неизвестный тип
         "targets: [{name: x, type: http, url: not-a-url}]",
         "interval: 0\ntargets: [{name: x, type: dns, host: h}]",
-        "intervall: 5\ntargets: [{name: x, type: dns, host: h}]",  # typo'd key
-        "targets: [{name: x, type: dns, host: a}, {name: x, type: dns, host: b}]",  # duplicate
+        "intervall: 5\ntargets: [{name: x, type: dns, host: h}]",  # опечатка в ключе
+        "targets: [{name: x, type: dns, host: a}, {name: x, type: dns, host: b}]",  # дубликат имени
     ],
 )
 def test_invalid_config_is_rejected(tmp_path: Path, body: str) -> None:

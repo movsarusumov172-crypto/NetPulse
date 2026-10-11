@@ -1,4 +1,4 @@
-"""Command-line interface."""
+"""Интерфейс командной строки."""
 
 import asyncio
 import contextlib
@@ -17,11 +17,13 @@ from netpulse.models import CheckResult, target_from_string
 from netpulse.monitor import run_monitor
 from netpulse.storage import Storage
 
-app = typer.Typer(help="Async uptime monitor for HTTP, TCP and DNS targets.", no_args_is_help=True)
+app = typer.Typer(
+    help="Асинхронный мониторинг доступности HTTP-, TCP- и DNS-целей.", no_args_is_help=True
+)
 
 ConfigOption = Annotated[
     Path,
-    typer.Option("--config", "-c", envvar="NETPULSE_CONFIG", help="Path to the YAML config."),
+    typer.Option("--config", "-c", envvar="NETPULSE_CONFIG", help="Путь к YAML-конфигу."),
 ]
 
 
@@ -48,12 +50,13 @@ def _format_result(result: CheckResult) -> str:
 
 @app.command()
 def run(config: ConfigOption = Path("config.yaml")) -> None:
-    """Monitor all configured targets until stopped."""
+    """Мониторить все цели из конфига, пока процесс не остановят."""
     settings = _load(config)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    # httpx logs every request at INFO; the Telegram request URL contains the bot token.
+    # httpx пишет каждый запрос на уровне INFO, а URL запроса к Telegram содержит токен бота.
     logging.getLogger("httpx").setLevel(logging.WARNING)
-    # As PID 1 in a container, SIGTERM would otherwise be ignored. Exiting lets asyncio clean up.
+    # Как PID 1 в контейнере процесс иначе игнорировал бы SIGTERM.
+    # Выход даёт asyncio завершиться штатно.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(run_monitor(settings))
@@ -61,13 +64,13 @@ def run(config: ConfigOption = Path("config.yaml")) -> None:
 
 @app.command()
 def check(
-    target: Annotated[str, typer.Argument(help="An http(s):// URL, host:port, or a DNS name.")],
-    timeout: Annotated[float, typer.Option(help="Seconds before the check is aborted.")] = 10.0,
+    target: Annotated[str, typer.Argument(help="URL http(s)://, host:port или DNS-имя.")],
+    timeout: Annotated[float, typer.Option(help="Секунд до прерывания проверки.")] = 10.0,
     ssl_warn_days: Annotated[
-        int, typer.Option(help="Fail if the certificate expires sooner.")
+        int, typer.Option(help="Считать цель упавшей, если сертификат истекает раньше.")
     ] = 14,
 ) -> None:
-    """Check one target right now. Exits with code 1 if it is down."""
+    """Проверить одну цель прямо сейчас. Код выхода 1, если цель недоступна."""
     result = asyncio.run(run_check(target_from_string(target), timeout, ssl_warn_days))
     typer.echo(_format_result(result))
     raise typer.Exit(0 if result.ok else 1)
@@ -75,7 +78,7 @@ def check(
 
 @app.command()
 def status(config: ConfigOption = Path("config.yaml")) -> None:
-    """Show the latest result and 24h uptime of every configured target."""
+    """Показать последний результат и аптайм за 24 часа для каждой цели из конфига."""
     settings = _load(config)
     if not settings.database.exists():
         typer.echo(f"No database at {settings.database}: has `netpulse run` started yet?", err=True)

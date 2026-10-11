@@ -1,4 +1,4 @@
-"""The monitoring loop: schedules checks and reacts to their results."""
+"""Цикл мониторинга: планирует проверки и реагирует на их результаты."""
 
 import asyncio
 import logging
@@ -10,6 +10,7 @@ import httpx
 
 from netpulse.checks import Checker
 from netpulse.config import Settings
+from netpulse.dashboard import StatusBoard, StatusServer
 from netpulse.metrics import Metrics
 from netpulse.models import CheckResult, Target
 from netpulse.notifier import Notifier, format_alert, telegram_from_env
@@ -34,6 +35,7 @@ class Monitor:
         storage: Storage,
         metrics: Metrics,
         notifier: Notifier | None = None,
+        board: StatusBoard | None = None,
         sleep: SleepFn = asyncio.sleep,
     ) -> None:
         self._settings = settings
@@ -41,9 +43,11 @@ class Monitor:
         self._storage = storage
         self._metrics = metrics
         self._notifier = notifier
+        self._board = board
         self._sleep = sleep
         self._semaphore = asyncio.Semaphore(settings.concurrency)
-        # Seed from the database so a restart does not re-alert about a target that is still down.
+        # Берём состояние из базы, чтобы после перезапуска не слать повторный алерт
+        # о цели, которая всё ещё лежит.
         self._tracker = StateTracker(storage.last_states())
 
     async def run(self) -> None:
@@ -58,7 +62,7 @@ class Monitor:
             await self._sleep(max(0.0, self._settings.interval - (time.monotonic() - started)))
 
     async def check_target(self, target: Target) -> CheckResult:
-        """One full check cycle: attempts with retries, then persist, expose and alert."""
+        """Полный цикл проверки: попытки с ретраями, затем сохранение, метрики и алерт."""
         result = await check_with_retry(
             partial(self._attempt, target),
             retries=self._settings.retries,
@@ -70,6 +74,8 @@ class Monitor:
         )
         self._storage.save(result)
         self._metrics.record(result)
+        if self._board is not None:
+            self._board.record(result)
         event = self._tracker.update(result)
         if event is not None:
             self._log_event(target, result, event)
@@ -78,7 +84,8 @@ class Monitor:
         return result
 
     async def _attempt(self, target: Target) -> CheckResult:
-        # The slot is held per attempt, not per cycle, so retry backoff never blocks other checks.
+        # Слот занимается на одну попытку, а не на цикл: пауза между ретраями
+        # не блокирует другие проверки.
         async with self._semaphore:
             return await self._check(target)
 
@@ -91,10 +98,12 @@ class Monitor:
 
 
 async def run_monitor(settings: Settings) -> None:
-    """Wire up real dependencies and monitor until cancelled."""
+    """Собрать реальные зависимости и мониторить до отмены."""
     metrics = Metrics()
-    port = metrics.start(settings.metrics_host, settings.metrics_port)
-    logger.info("Serving metrics on http://%s:%s/metrics", settings.metrics_host, port)
+    board = StatusBoard(list(settings.targets), settings.interval)
+    server = StatusServer(metrics.registry, board)
+    port = server.start(settings.metrics_host, settings.metrics_port)
+    logger.info("Status page on http://%s:%s/ (metrics: /metrics)", settings.metrics_host, port)
     try:
         with Storage(settings.database) as storage:
             async with (
@@ -108,10 +117,11 @@ async def run_monitor(settings: Settings) -> None:
                     storage=storage,
                     metrics=metrics,
                     notifier=telegram_from_env(alert_client),
+                    board=board,
                 )
                 logger.info(
                     "Monitoring %d targets every %gs", len(settings.targets), settings.interval
                 )
                 await monitor.run()
     finally:
-        metrics.stop()
+        server.stop()

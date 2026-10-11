@@ -1,19 +1,17 @@
-"""Prometheus metrics and the HTTP endpoint that exposes them."""
+"""Метрики Prometheus. HTTP-эндпоинт для них — в `dashboard.StatusServer`."""
 
 from contextlib import suppress
-from http.server import HTTPServer
 
 from prometheus_client import (
     CollectorRegistry,
     Counter,
     Gauge,
     disable_created_metrics,
-    start_http_server,
 )
 
 from netpulse.models import CheckResult
 
-disable_created_metrics()  # type: ignore[no-untyped-call]  # drop the noisy *_created series
+disable_created_metrics()  # type: ignore[no-untyped-call]  # убираем шумные серии *_created
 
 
 class Metrics:
@@ -43,7 +41,6 @@ class Metrics:
             ["target", "result"],
             registry=self.registry,
         )
-        self._server: HTTPServer | None = None
 
     def record(self, result: CheckResult) -> None:
         target = result.target
@@ -57,19 +54,8 @@ class Metrics:
         if value is not None:
             gauge.labels(target).set(value)
             return
-        with suppress(KeyError):  # nothing to clear if the series was never set
+        with suppress(KeyError):  # нечего удалять, если серия ни разу не выставлялась
             gauge.remove(target)
-
-    def start(self, host: str, port: int) -> int:
-        """Serve `/metrics` in a background thread. Returns the bound port."""
-        self._server, _ = start_http_server(port, addr=host, registry=self.registry)
-        return int(self._server.server_port)
-
-    def stop(self) -> None:
-        if self._server is not None:
-            self._server.shutdown()
-            self._server.server_close()
-            self._server = None
 
 
 def _seconds(milliseconds: float | None) -> float | None:

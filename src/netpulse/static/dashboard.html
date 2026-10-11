@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NetPulse — статус сервисов</title>
+  <style>
+    :root {
+      --bg: #0b1120;
+      --surface: #111a2e;
+      --line: #1e2a44;
+      --ink: #e5ecf7;
+      --muted: #8a9bb8;
+      --up: #22c55e;
+      --down: #ef4444;
+      --pending: #64748b;
+      --warn: #f59e0b;
+      font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+      color: var(--ink);
+      background: var(--bg);
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; }
+    h1, h2, p { margin: 0; }
+    .wrap { max-width: 1180px; margin: 0 auto; padding: 32px 24px; display: grid; gap: 24px; }
+    header { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; }
+    .brand { display: flex; align-items: center; gap: 12px; }
+    .pulse { width: 14px; height: 14px; border-radius: 50%; background: var(--up); box-shadow: 0 0 0 0 rgba(34, 197, 94, .6); animation: pulse 2s infinite; }
+    .pulse.bad { background: var(--down); box-shadow: 0 0 0 0 rgba(239, 68, 68, .6); }
+    @keyframes pulse { 70% { box-shadow: 0 0 0 12px rgba(0, 0, 0, 0); } 100% { box-shadow: 0 0 0 0 rgba(0, 0, 0, 0); } }
+    .meta { color: var(--muted); font-size: 14px; display: flex; gap: 16px; }
+    .meta a { color: var(--muted); }
+    .banner { padding: 18px 22px; border-radius: 14px; font-size: 18px; font-weight: 600; background: rgba(34, 197, 94, .12); border: 1px solid rgba(34, 197, 94, .35); }
+    .banner.bad { background: rgba(239, 68, 68, .12); border-color: rgba(239, 68, 68, .4); }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; }
+    .card { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 18px; display: grid; gap: 12px; border-left: 4px solid var(--pending); }
+    .card.up { border-left-color: var(--up); }
+    .card.down { border-left-color: var(--down); }
+    .top { display: flex; justify-content: space-between; gap: 12px; align-items: start; }
+    .name { font-weight: 600; font-size: 16px; }
+    .address { color: var(--muted); font-size: 13px; word-break: break-all; }
+    .state { font-size: 12px; font-weight: 700; padding: 4px 10px; border-radius: 999px; white-space: nowrap; }
+    .state.up { background: rgba(34, 197, 94, .15); color: var(--up); }
+    .state.down { background: rgba(239, 68, 68, .15); color: var(--down); }
+    .state.pending { background: rgba(100, 116, 139, .2); color: var(--muted); }
+    .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+    .stat small { display: block; color: var(--muted); font-size: 12px; }
+    .stat strong { font-size: 15px; }
+    .stat .warn { color: var(--warn); }
+    .bars { display: flex; gap: 3px; align-items: end; height: 34px; }
+    .bar { flex: 1; min-width: 4px; border-radius: 2px; background: var(--up); opacity: .85; }
+    .bar.fail { background: var(--down); height: 100% !important; opacity: .7; }
+    .bar.empty { background: var(--line); height: 20% !important; }
+    .error { font-size: 13px; color: #fca5a5; background: rgba(239, 68, 68, .08); border-radius: 8px; padding: 8px 10px; word-break: break-word; }
+    .foot { color: var(--muted); font-size: 12px; display: flex; justify-content: space-between; gap: 8px; }
+    .offline { color: var(--down); }
+    .badge { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; margin-right: 6px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="brand">
+        <span id="pulse" class="pulse"></span>
+        <h1>NetPulse</h1>
+      </div>
+      <div class="meta">
+        <span id="updated">Загрузка…</span>
+        <a href="/metrics">Prometheus /metrics</a>
+        <a href="/api/status">JSON</a>
+      </div>
+    </header>
+    <div id="banner" class="banner">Получаем статус…</div>
+    <div id="grid" class="grid"></div>
+  </div>
+
+  <script>
+    "use strict";
+
+    const STATE_TEXT = { up: "Работает", down: "Не отвечает", pending: "Ждём первую проверку" };
+    const HISTORY_SIZE = 30;
+
+    function el(tag, className, text) {
+      const element = document.createElement(tag);
+      if (className) element.className = className;
+      if (text !== undefined) element.textContent = text;
+      return element;
+    }
+
+    function ago(iso) {
+      if (!iso) return "—";
+      const seconds = Math.max(0, Math.round((Date.now() - new Date(iso)) / 1000));
+      if (seconds < 60) return `${seconds} с`;
+      const minutes = Math.floor(seconds / 60);
+      if (minutes < 60) return `${minutes} мин`;
+      const hours = Math.floor(minutes / 60);
+      return `${hours} ч ${minutes % 60} мин`;
+    }
+
+    function stat(label, value, className) {
+      const box = el("div", "stat");
+      box.append(el("small", null, label), el("strong", className, value));
+      return box;
+    }
+
+    function bars(history) {
+      const box = el("div", "bars");
+      box.title = `Последние ${HISTORY_SIZE} проверок`;
+      const slowest = Math.max(1, ...history.map((item) => item.latency_ms ?? 0));
+      for (let i = history.length; i < HISTORY_SIZE; i += 1) box.append(el("span", "bar empty"));
+      for (const item of history) {
+        const bar = el("span", item.ok ? "bar" : "bar fail");
+        bar.style.height = `${Math.max(12, ((item.latency_ms ?? 0) / slowest) * 100)}%`;
+        bar.title = item.ok ? `${Math.round(item.latency_ms ?? 0)} мс` : "сбой";
+        box.append(bar);
+      }
+      return box;
+    }
+
+    function card(target) {
+      const box = el("article", `card ${target.state}`);
+      const top = el("div", "top");
+      const title = el("div");
+      const name = el("div", "name");
+      name.append(el("span", "badge", target.type), target.name);
+      title.append(name, el("div", "address", target.address));
+      top.append(title, el("span", `state ${target.state}`, STATE_TEXT[target.state]));
+
+      const latency = target.latency_ms == null ? "—" : `${Math.round(target.latency_ms)} мс`;
+      const uptime = target.uptime == null ? "—" : `${(target.uptime * 100).toFixed(1)}%`;
+      const sslWarn = target.ssl_days_left != null && target.ssl_days_left < 14 ? "warn" : null;
+      const ssl = target.ssl_days_left == null ? "—" : `${target.ssl_days_left} дн.`;
+      const stats = el("div", "stats");
+      stats.append(stat("Задержка", latency), stat("Аптайм", uptime), stat("SSL истекает", ssl, sslWarn));
+
+      box.append(top, stats, bars(target.history));
+      if (target.state === "down" && target.error) box.append(el("div", "error", target.error));
+      const foot = el("div", "foot");
+      const since = target.state === "pending" ? "" : `${target.state === "up" ? "Работает" : "Лежит"} уже ${ago(target.since)}`;
+      foot.append(el("span", null, since), el("span", null, `проверок: ${target.checks}`));
+      box.append(foot);
+      return box;
+    }
+
+    async function refresh() {
+      try {
+        const response = await fetch("/api/status", { cache: "no-store" });
+        const data = await response.json();
+        const down = data.targets.filter((t) => t.state === "down");
+        const up = data.targets.filter((t) => t.state === "up");
+        const banner = document.getElementById("banner");
+        banner.className = down.length ? "banner bad" : "banner";
+        banner.textContent = down.length
+          ? `Проблемы: ${down.map((t) => t.name).join(", ")}. Работают ${up.length} из ${data.targets.length}.`
+          : `Все сервисы работают (${up.length} из ${data.targets.length})`;
+        document.getElementById("pulse").className = down.length ? "pulse bad" : "pulse";
+        document.getElementById("grid").replaceChildren(...data.targets.map(card));
+        const updated = document.getElementById("updated");
+        updated.className = "";
+        updated.textContent = `Обновлено ${new Date().toLocaleTimeString("ru-RU")} · проверка каждые ${data.interval} с`;
+      } catch {
+        const updated = document.getElementById("updated");
+        updated.className = "offline";
+        updated.textContent = "Монитор недоступен — данные устарели";
+      }
+    }
+
+    refresh();
+    setInterval(refresh, 5000);
+  </script>
+</body>
+</html>

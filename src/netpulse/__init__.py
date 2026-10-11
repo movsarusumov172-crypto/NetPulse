@@ -1,3 +1,3 @@
-"""NetPulse: async uptime monitoring for HTTP, TCP and DNS targets."""
+"""NetPulse: асинхронный мониторинг доступности HTTP-, TCP- и DNS-целей."""
 
 __version__ = "0.1.0"

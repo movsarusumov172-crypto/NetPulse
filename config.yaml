@@ -1,14 +1,14 @@
-# NetPulse configuration. Secrets (Telegram token) live in .env, never here.
+# Конфигурация NetPulse. Секреты (токен Telegram) лежат в .env, а не здесь.
 
-interval: 30              # seconds between checks of each target
-timeout: 10               # seconds before a single check attempt is aborted
-concurrency: 10           # max checks running at the same time
-retries: 3                # extra attempts before a target is declared DOWN
-retry_base_delay: 1       # seconds; doubles each retry (1s, 2s, 4s, ...)
-ssl_expiry_warn_days: 14  # HTTPS targets fail when the certificate expires sooner
+interval: 30              # секунд между проверками каждой цели
+timeout: 10               # секунд до прерывания одной попытки проверки
+concurrency: 10           # максимум одновременных проверок
+retries: 3                # дополнительных попыток до признания цели упавшей
+retry_base_delay: 1       # секунд; удваивается с каждым повтором (1с, 2с, 4с, ...)
+ssl_expiry_warn_days: 14  # HTTPS-цель считается упавшей, если сертификат истекает раньше
 
-database: netpulse.db     # relative to the working directory (/data in Docker)
-metrics_host: 0.0.0.0     # use 127.0.0.1 to keep /metrics local; 0.0.0.0 is needed in Docker
+database: netpulse.db     # относительно рабочей директории (в Docker это /data)
+metrics_host: 0.0.0.0     # 127.0.0.1 — только локально; в Docker нужен 0.0.0.0
 metrics_port: 9100
 
 targets:

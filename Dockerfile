@@ -9,7 +9,7 @@ COPY pyproject.toml README.md ./
 COPY src ./src
 RUN pip install .
 
-# Run unprivileged; /data (the working directory) holds the SQLite database.
+# Запуск без root; в /data (рабочая директория) лежит база SQLite.
 RUN useradd --system --no-create-home netpulse \
     && mkdir /data \
     && chown netpulse /data

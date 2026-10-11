@@ -1,4 +1,4 @@
-"""Domain models: monitored targets and check results."""
+"""Доменные модели: проверяемые цели и результаты проверок."""
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -43,13 +43,13 @@ class DnsTarget(_TargetBase):
 
 
 Target = HttpTarget | TcpTarget | DnsTarget
-"""Used in code; configs validate against `TargetField`, which picks the model by `type`."""
+"""Для кода; конфиг валидируется через `TargetField`, который выбирает модель по `type`."""
 
 TargetField = Annotated[Target, Field(discriminator="type")]
 
 
 def target_from_string(value: str) -> Target:
-    """Build an ad-hoc target: URL -> HTTP, `host:port` -> TCP, anything else -> DNS."""
+    """Собрать цель на лету: URL -> HTTP, `host:port` -> TCP, всё остальное -> DNS."""
     if value.startswith(("http://", "https://")):
         return HttpTarget(name=value, url=HttpUrl(value))
     host, sep, port = value.rpartition(":")

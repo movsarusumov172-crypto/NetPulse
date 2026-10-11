@@ -1,4 +1,4 @@
-"""Up/down state tracking: turns a stream of results into state-change events."""
+"""Отслеживание состояния up/down: превращает поток результатов в события смены состояния."""
 
 from collections.abc import Mapping
 from enum import StrEnum
@@ -12,10 +12,10 @@ class Event(StrEnum):
 
 
 class StateTracker:
-    """Remembers the last known state per target and reports only changes.
+    """Помнит последнее известное состояние каждой цели и сообщает только об изменениях.
 
-    A target with no known state is not "up" or "down" yet: its first successful
-    check is silent, but a first failed check is an event worth alerting on.
+    У цели без известного состояния нет ни «up», ни «down»: первая успешная
+    проверка проходит молча, а первая неудачная — событие, о котором нужно сообщить.
     """
 
     def __init__(self, initial: Mapping[str, bool] | None = None) -> None:

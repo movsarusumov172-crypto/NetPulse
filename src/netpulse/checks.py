@@ -1,4 +1,4 @@
-"""Single-shot health checks for HTTP, TCP and DNS targets."""
+"""Одиночные проверки доступности HTTP-, TCP- и DNS-целей."""
 
 import asyncio
 import ssl
@@ -13,7 +13,7 @@ _SECONDS_PER_DAY = 86_400
 
 
 def ssl_days_left(ssl_object: Any) -> int | None:
-    """Whole days until the peer certificate expires, or None if there is no certificate."""
+    """Целых дней до истечения сертификата сервера или None, если сертификата нет."""
     cert = ssl_object.getpeercert() if ssl_object is not None else None
     if not cert or "notAfter" not in cert:
         return None
@@ -22,7 +22,7 @@ def ssl_days_left(ssl_object: Any) -> int | None:
 
 
 class Checker:
-    """Runs one check attempt against a target. Never raises on network failures."""
+    """Выполняет одну попытку проверки цели. Сетевые ошибки не выбрасывает."""
 
     def __init__(self, client: httpx.AsyncClient, timeout: float, ssl_warn_days: int) -> None:
         self._client = client
@@ -46,7 +46,7 @@ class Checker:
 
     async def _check_http(self, target: HttpTarget) -> CheckResult:
         started = time.perf_counter()
-        # Stream so the body is never downloaded: latency is time to response headers.
+        # Читаем потоком, тело не скачивается: задержка — это время до получения заголовков ответа.
         async with self._client.stream("GET", str(target.url)) as response:
             latency_ms = (time.perf_counter() - started) * 1000
             stream = response.extensions.get("network_stream")
@@ -82,6 +82,6 @@ class Checker:
 
 
 async def run_check(target: Target, timeout: float, ssl_warn_days: int) -> CheckResult:
-    """One-off check with a throwaway client, used by the `check` CLI command."""
+    """Разовая проверка с одноразовым клиентом для команды `check`."""
     async with httpx.AsyncClient(follow_redirects=True, timeout=None) as client:
         return await Checker(client, timeout, ssl_warn_days).check(target)
