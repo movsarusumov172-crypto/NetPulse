@@ -74,6 +74,14 @@ class CheckResult:
 
 
 @dataclass(frozen=True, slots=True)
+class Uptime:
+    """Share of successful checks (0..1) over the last 24 hours and 7 days; None = no checks."""
+
+    day: float | None
+    week: float | None
+
+
+@dataclass(frozen=True, slots=True)
 class Incident:
     """A period during which a target was down. `ended_at` is None while it is ongoing."""
 

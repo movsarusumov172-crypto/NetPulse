@@ -208,3 +208,62 @@ def test_migration_rebuilds_past_incidents_from_stored_results(tmp_path: Path) -
     assert closed.started_at == datetime(2030, 1, 1, 0, 1, tzinfo=UTC)
     assert closed.ended_at == datetime(2030, 1, 1, 0, 3, tzinfo=UTC)
     assert incidents["still down"].ended_at is None
+
+
+def _save_at(storage: Storage, target: str, ok: bool, at: datetime) -> None:
+    storage.save(CheckResult(target, ok=ok, checked_at=at))
+
+
+def test_uptime_covers_24_hours_and_7_days_separately() -> None:
+    now = datetime(2030, 1, 10, 12, tzinfo=UTC)
+    with Storage(":memory:") as storage:
+        for hours_ago in (100, 90, 80):  # older than a day, within a week: two of three fail
+            _save_at(storage, "web", hours_ago == 100, now - timedelta(hours=hours_ago))
+        for hours_ago in (3, 2, 1, 0):  # last day: one failure in four
+            _save_at(storage, "web", hours_ago != 2, now - timedelta(hours=hours_ago))
+
+        uptime = storage.uptime(now)["web"]
+
+    assert uptime.day == 0.75
+    assert uptime.week == 4 / 7
+
+
+def test_uptime_ignores_the_time_the_monitor_was_not_running() -> None:
+    """Nothing is stored while the monitor is off, so the gap must count neither way."""
+    now = datetime(2030, 1, 10, 12, tzinfo=UTC)
+    with Storage(":memory:") as storage:
+        for half_hours in range(0, 12):  # ran for 6 hours, then was stopped for 14 hours
+            _save_at(
+                storage, "web", True, now - timedelta(hours=24) + timedelta(minutes=30 * half_hours)
+            )
+        for half_hours in range(0, 8):  # came back for the last 4 hours
+            _save_at(
+                storage, "web", True, now - timedelta(hours=4) + timedelta(minutes=30 * half_hours)
+            )
+
+        assert storage.uptime(now)["web"].day == 1.0
+
+
+def test_a_failure_right_before_the_monitor_stopped_is_not_stretched_over_the_gap() -> None:
+    now = datetime(2030, 1, 10, 12, tzinfo=UTC)
+    with Storage(":memory:") as storage:
+        _save_at(storage, "web", True, now - timedelta(hours=20))
+        _save_at(storage, "web", False, now - timedelta(hours=19, minutes=59))  # last check before
+        _save_at(storage, "web", True, now - timedelta(hours=2))  # monitor started again
+        _save_at(storage, "web", True, now - timedelta(hours=1))
+
+        # Four checks, one failed: the 17 silent hours are not counted as 17 hours of downtime.
+        assert storage.uptime(now)["web"].day == 0.75
+
+
+def test_uptime_is_none_for_a_window_without_checks() -> None:
+    now = datetime(2030, 1, 10, 12, tzinfo=UTC)
+    with Storage(":memory:") as storage:
+        _save_at(storage, "paused-for-days", True, now - timedelta(days=3))
+        _save_at(storage, "gone", True, now - timedelta(days=30))
+
+        uptime = storage.uptime(now)
+
+    assert uptime["paused-for-days"].day is None
+    assert uptime["paused-for-days"].week == 1.0
+    assert "gone" not in uptime

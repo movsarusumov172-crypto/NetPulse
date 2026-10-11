@@ -3,12 +3,12 @@
 import sqlite3
 from collections.abc import Callable, Collection
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import TracebackType
 from typing import Self
 
-from netpulse.models import CheckResult, Incident
+from netpulse.models import CheckResult, Incident, Uptime
 
 
 class StorageError(Exception):
@@ -177,6 +177,16 @@ class Storage:
             (since.isoformat(),),
         )
         return {row["target"]: row["ratio"] for row in rows}
+
+    def uptime(self, now: datetime) -> dict[str, Uptime]:
+        """24-hour and 7-day uptime per target, computed from the stored results.
+
+        Uptime is the share of successful checks, so a stretch in which the monitor itself
+        was not running (and therefore stored nothing) neither raises nor lowers it.
+        """
+        day = self.uptime_ratios(now - timedelta(hours=24))
+        week = self.uptime_ratios(now - timedelta(days=7))
+        return {target: Uptime(day.get(target), ratio) for target, ratio in week.items()}
 
     def open_incident(self, target: str, started_at: datetime, error: str | None) -> None:
         """Start an incident unless the target already has an open one."""

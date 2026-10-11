@@ -3,9 +3,10 @@
 import asyncio
 import contextlib
 import logging
+import math
 import signal
 import sys
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
@@ -13,7 +14,7 @@ import typer
 
 from netpulse.checks import run_check
 from netpulse.config import ConfigError, Settings, load_settings
-from netpulse.models import CheckResult, target_from_string
+from netpulse.models import CheckResult, Uptime, target_from_string
 from netpulse.monitor import run_monitor
 from netpulse.storage import Storage
 
@@ -31,6 +32,17 @@ def _load(path: Path) -> Settings:
     except ConfigError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(2) from exc
+
+
+_NO_UPTIME = Uptime(day=None, week=None)
+
+
+def _percent(ratio: float | None) -> str:
+    """Rounded down, so 99.996% is never shown as a perfect 100%."""
+    if ratio is None:
+        return "-"
+    value = math.floor(ratio * 10_000) / 100
+    return "100%" if value == 100 else f"{value:.2f}%"
 
 
 def _format_result(result: CheckResult) -> str:
@@ -75,7 +87,7 @@ def check(
 
 @app.command()
 def status(config: ConfigOption = Path("config.yaml")) -> None:
-    """Show the latest result and 24h uptime of every configured target."""
+    """Show the latest result and 24h / 7d uptime of every configured target."""
     settings = _load(config)
     if not settings.database.exists():
         typer.echo(f"No database at {settings.database}: has `netpulse run` started yet?", err=True)
@@ -83,7 +95,7 @@ def status(config: ConfigOption = Path("config.yaml")) -> None:
 
     with Storage(settings.database) as storage:
         results = storage.latest()
-        uptime = storage.uptime_ratios(datetime.now(UTC) - timedelta(hours=24))
+        uptime = storage.uptime(datetime.now(UTC))
 
     configured = {target.name for target in settings.targets}
     rows = [
@@ -91,7 +103,8 @@ def status(config: ConfigOption = Path("config.yaml")) -> None:
             result.target,
             "UP" if result.ok else "DOWN",
             f"{result.latency_ms:.0f} ms" if result.latency_ms is not None else "-",
-            f"{uptime[result.target]:.1%}",
+            _percent(uptime.get(result.target, _NO_UPTIME).day),
+            _percent(uptime.get(result.target, _NO_UPTIME).week),
             result.checked_at.strftime("%Y-%m-%d %H:%M:%S"),
             result.error or "",
         )
@@ -101,7 +114,7 @@ def status(config: ConfigOption = Path("config.yaml")) -> None:
     if not rows:
         typer.echo("No results yet.")
         return
-    header = ("TARGET", "STATE", "LATENCY", "UPTIME 24H", "CHECKED (UTC)", "ERROR")
+    header = ("TARGET", "STATE", "LATENCY", "UPTIME 24H", "UPTIME 7D", "CHECKED (UTC)", "ERROR")
     widths = [max(len(row[i]) for row in [header, *rows]) for i in range(len(header))]
     for row in [header, *rows]:
         typer.echo(

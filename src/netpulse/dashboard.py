@@ -3,6 +3,7 @@
 import json
 import logging
 import threading
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -15,7 +16,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, generate_latest
 
-from netpulse.models import CheckResult, Incident, Target
+from netpulse.models import CheckResult, Incident, Target, Uptime
 from netpulse.storage import Storage
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,7 @@ logger = logging.getLogger(__name__)
 HISTORY_SIZE = 30
 INCIDENTS_DEFAULT_LIMIT = 20
 INCIDENTS_MAX_LIMIT = 100
+UPTIME_CACHE_SECONDS = 30.0
 
 
 @dataclass
@@ -89,6 +91,27 @@ def _describe(status: _TargetStatus) -> dict[str, Any]:
     }
 
 
+class _UptimeCache:
+    """Uptime scans a week of results, so every page refresh must not repeat it."""
+
+    def __init__(self, db_path: Path | None, ttl: float) -> None:
+        self._db_path = db_path
+        self._ttl = ttl
+        self._lock = threading.Lock()
+        self._value: dict[str, Uptime] = {}
+        self._expires = 0.0
+
+    def get(self) -> dict[str, Uptime]:
+        if self._db_path is None:
+            return {}
+        with self._lock:
+            if time.monotonic() >= self._expires:
+                with Storage(self._db_path, readonly=True) as storage:
+                    self._value = storage.uptime(datetime.now(UTC))
+                self._expires = time.monotonic() + self._ttl
+            return self._value
+
+
 class _BadRequest(Exception):
     """A malformed query parameter; the message is returned to the client."""
 
@@ -102,11 +125,13 @@ class _Server(ThreadingHTTPServer):
         registry: CollectorRegistry,
         board: StatusBoard,
         db_path: Path | None,
+        uptime_ttl: float,
     ) -> None:
         super().__init__(address, _Handler)
         self.registry = registry
         self.board = board
         self.db_path = db_path
+        self.uptime = _UptimeCache(db_path, uptime_ttl)
         self.page = files("netpulse").joinpath("static/dashboard.html").read_bytes()
 
 
@@ -151,13 +176,23 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/metrics":
             self._send(generate_latest(server.registry), CONTENT_TYPE_LATEST)
         elif path == "/api/status":
-            self._send_json(server.board.snapshot())
+            self._send_json(self._status(server))
         elif path == "/api/incidents":
             self._incidents(server, query)
         elif path == "/":
             self._send(server.page, "text/html; charset=utf-8")
         else:
             self._send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+
+    @staticmethod
+    def _status(server: _Server) -> dict[str, Any]:
+        snapshot = server.board.snapshot()
+        uptimes = server.uptime.get()
+        for target in snapshot["targets"]:
+            uptime = uptimes.get(target["name"])
+            target["uptime_24h"] = uptime.day if uptime else None
+            target["uptime_7d"] = uptime.week if uptime else None
+        return snapshot
 
     def _incidents(self, server: _Server, query: dict[str, list[str]]) -> None:
         limit = _int_param(query, "limit", INCIDENTS_DEFAULT_LIMIT, 1, INCIDENTS_MAX_LIMIT)
@@ -194,21 +229,30 @@ class _Handler(BaseHTTPRequestHandler):
 class StatusServer:
     """Serves `/` (status page), `/api/*` (JSON) and `/metrics` (Prometheus).
 
-    `db_path` is where history endpoints read from, each request through its own
-    read-only connection; without it they return empty data.
+    `db_path` is where history endpoints (incidents, uptime) read from, each request through
+    its own read-only connection; without it they return empty data. Uptime is cached for
+    `uptime_ttl` seconds.
     """
 
     def __init__(
-        self, registry: CollectorRegistry, board: StatusBoard, db_path: Path | None = None
+        self,
+        registry: CollectorRegistry,
+        board: StatusBoard,
+        db_path: Path | None = None,
+        *,
+        uptime_ttl: float = UPTIME_CACHE_SECONDS,
     ) -> None:
         self._registry = registry
         self._board = board
         self._db_path = db_path
+        self._uptime_ttl = uptime_ttl
         self._server: _Server | None = None
 
     def start(self, host: str, port: int) -> int:
         """Start the server in a background thread. Returns the bound port."""
-        self._server = _Server((host, port), self._registry, self._board, self._db_path)
+        self._server = _Server(
+            (host, port), self._registry, self._board, self._db_path, self._uptime_ttl
+        )
         threading.Thread(
             target=self._server.serve_forever, kwargs={"poll_interval": 0.1}, daemon=True
         ).start()
