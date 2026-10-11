@@ -21,7 +21,7 @@ class FakeNotifier:
 
 
 class ScriptedCheck:
-    """Возвращает по одному заданному исходу на попытку; последний повторяется."""
+    """Returns one scripted outcome per attempt; the last outcome repeats."""
 
     def __init__(self, *outcomes: bool) -> None:
         self.outcomes = outcomes
@@ -75,7 +75,7 @@ async def test_transient_failure_is_absorbed_by_retry_and_never_alerts(storage: 
 
 async def test_alerts_once_when_down_and_once_when_recovered(storage: Storage) -> None:
     notifier = FakeNotifier()
-    # retries=2 -> 3 попытки за цикл: два полностью неудачных цикла, затем успех.
+    # retries=2 -> 3 attempts per cycle: two full failing cycles, then a success.
     check = ScriptedCheck(False, False, False, False, False, False, True)
     monitor = make_monitor(storage, check, notifier)
 
@@ -107,7 +107,7 @@ async def test_restart_does_not_realert_for_a_target_that_is_still_down(storage:
     await make_monitor(storage, ScriptedCheck(False), first, retries=0).check_target(TARGET)
     assert len(first.messages) == 1
 
-    second = FakeNotifier()  # «перезапущенный» процесс читает ту же базу
+    second = FakeNotifier()  # a "restarted" process reading the same database
     await make_monitor(storage, ScriptedCheck(False), second, retries=0).check_target(TARGET)
     assert second.messages == []
 

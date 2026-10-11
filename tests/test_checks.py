@@ -45,7 +45,7 @@ async def test_http_ok_records_status_and_latency(client_for: ClientFactory) -> 
     assert result.ok
     assert result.status_code == 200
     assert result.latency_ms is not None
-    assert result.ssl_days_left is None  # у мок-транспорта нет TLS-потока
+    assert result.ssl_days_left is None  # the mock transport has no TLS stream
 
 
 async def test_http_unexpected_status_fails_but_keeps_latency(client_for: ClientFactory) -> None:

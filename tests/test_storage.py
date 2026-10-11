@@ -37,7 +37,9 @@ def test_last_states_restores_up_down_flags() -> None:
 def test_uptime_ratio_only_counts_results_since_cutoff() -> None:
     now = datetime.now(UTC)
     with Storage(":memory:") as storage:
-        storage.save(CheckResult("a", ok=False, checked_at=now - timedelta(days=2)))  # вне окна
+        storage.save(
+            CheckResult("a", ok=False, checked_at=now - timedelta(days=2))
+        )  # outside the window
         for ok in (True, True, True, False):
             storage.save(CheckResult("a", ok=ok, checked_at=now - timedelta(minutes=1)))
         assert storage.uptime_ratios(now - timedelta(hours=24)) == {"a": 0.75}

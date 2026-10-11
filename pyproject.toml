@@ -43,12 +43,10 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC", "C4", "PT", "RUF"]
-# параметр `timeout` — обычное значение из конфига, внутри применяется через asyncio.timeout.
+# `timeout` params are plain config values, applied via asyncio.timeout inside.
 ignore = [
     "ASYNC109",
-    "RUF001",  # кириллица в строках, комментариях и докстрингах — это намеренно
-    "RUF002",
-    "RUF003",
+    "RUF001",  # Cyrillic in user-facing strings is intentional
 ]
 
 [tool.mypy]

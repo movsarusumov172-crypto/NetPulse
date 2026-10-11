@@ -3,7 +3,7 @@ from netpulse.retry import check_with_retry
 
 
 class Script:
-    """Вызываемый объект: воспроизводит заданные исходы попыток и записывает паузы."""
+    """An attempt callable that replays a fixed list of outcomes and records sleeps."""
 
     def __init__(self, *outcomes: bool) -> None:
         self.outcomes = list(outcomes)

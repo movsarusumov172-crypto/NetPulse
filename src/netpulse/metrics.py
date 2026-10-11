@@ -1,4 +1,4 @@
-"""Метрики Prometheus. HTTP-эндпоинт для них — в `dashboard.StatusServer`."""
+"""Prometheus metrics. The HTTP endpoint that exposes them lives in `dashboard.StatusServer`."""
 
 from contextlib import suppress
 
@@ -11,7 +11,7 @@ from prometheus_client import (
 
 from netpulse.models import CheckResult
 
-disable_created_metrics()  # type: ignore[no-untyped-call]  # убираем шумные серии *_created
+disable_created_metrics()  # type: ignore[no-untyped-call]  # drop the noisy *_created series
 
 
 class Metrics:
@@ -54,7 +54,7 @@ class Metrics:
         if value is not None:
             gauge.labels(target).set(value)
             return
-        with suppress(KeyError):  # нечего удалять, если серия ни разу не выставлялась
+        with suppress(KeyError):  # nothing to clear if the series was never set
             gauge.remove(target)
 
 

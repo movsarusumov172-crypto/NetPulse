@@ -1,4 +1,4 @@
-"""Страница статуса: последние результаты в памяти и HTTP-сервер для них и для Prometheus."""
+"""Status page: latest results in memory and the HTTP server for page, JSON and metrics."""
 
 import json
 import threading
@@ -21,14 +21,14 @@ HISTORY_SIZE = 30
 class _TargetStatus:
     target: Target
     last: CheckResult | None = None
-    since: datetime | None = None  # когда цель пришла в текущее состояние
+    since: datetime | None = None  # when the target entered its current state
     checks: int = 0
     successes: int = 0
     history: deque[CheckResult] = field(default_factory=lambda: deque(maxlen=HISTORY_SIZE))
 
 
 class StatusBoard:
-    """Последние результаты по каждой цели. Пишет цикл мониторинга, читает HTTP-поток."""
+    """Latest results per target. Written by the monitor loop, read by HTTP threads."""
 
     def __init__(self, targets: list[Target], interval: float) -> None:
         self._interval = interval
@@ -112,11 +112,11 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def log_message(self, format: str, *args: Any) -> None:
-        pass  # каждый запрос страницы раз в 5 секунд в логе не нужен
+        pass  # the page polls every 5 seconds; no need to log each request
 
 
 class StatusServer:
-    """Отдаёт `/` (страница статуса), `/api/status` (JSON) и `/metrics` (Prometheus)."""
+    """Serves `/` (status page), `/api/status` (JSON) and `/metrics` (Prometheus)."""
 
     def __init__(self, registry: CollectorRegistry, board: StatusBoard) -> None:
         self._registry = registry
@@ -124,7 +124,7 @@ class StatusServer:
         self._server: _Server | None = None
 
     def start(self, host: str, port: int) -> int:
-        """Запускает сервер в фоновом потоке. Возвращает занятый порт."""
+        """Start the server in a background thread. Returns the bound port."""
         self._server = _Server((host, port), self._registry, self._board)
         threading.Thread(target=self._server.serve_forever, daemon=True).start()
         return int(self._server.server_port)

@@ -1,4 +1,4 @@
-"""Повторные попытки с экспоненциальной задержкой."""
+"""Retry with exponential backoff."""
 
 import asyncio
 from collections.abc import Awaitable, Callable
@@ -13,10 +13,10 @@ async def check_with_retry(
     base_delay: float,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> CheckResult:
-    """Выполняет `attempt`, пока он не удастся или не кончатся `retries` дополнительных попыток.
+    """Run `attempt` until it succeeds or `retries` extra attempts are used up.
 
-    Пауза перед повтором N (с нуля) равна `base_delay * 2**N`. Возвращает первый
-    успешный результат или последний неудачный.
+    The delay before retry N (0-based) is `base_delay * 2**N`. Returns the first
+    successful result, or the last failure.
     """
     result = await attempt()
     for retry in range(retries):

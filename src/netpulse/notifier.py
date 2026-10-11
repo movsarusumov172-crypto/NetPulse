@@ -1,4 +1,4 @@
-"""Доставка алертов."""
+"""Alert delivery."""
 
 import logging
 import os
@@ -27,7 +27,7 @@ def format_alert(target: Target, result: CheckResult, event: Event) -> str:
 
 
 class TelegramNotifier:
-    """Шлёт сообщения через Telegram Bot API. Ошибки доставки логируются, а не пробрасываются."""
+    """Sends messages through the Telegram Bot API. Delivery failures are logged, not raised."""
 
     def __init__(self, client: httpx.AsyncClient, token: str, chat_id: str) -> None:
         self._client = client
@@ -35,7 +35,7 @@ class TelegramNotifier:
         self._chat_id = chat_id
 
     async def send(self, text: str) -> None:
-        # Логируем только тип исключения / статус: URL запроса содержит токен бота.
+        # Log only the exception type / status: the request URL contains the bot token.
         try:
             response = await self._client.post(
                 self._url, json={"chat_id": self._chat_id, "text": text}

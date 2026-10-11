@@ -1,105 +1,105 @@
 # NetPulse
 
-Асинхронный мониторинг доступности HTTP-, TCP- и DNS-целей. Проверяет ваши сервисы по расписанию,
-сохраняет каждый результат в SQLite, отдаёт метрики Prometheus и присылает сообщение в Telegram,
-когда сервис упал или поднялся — и только в эти моменты, поэтому без спама.
+Async uptime monitor for HTTP, TCP and DNS targets. It checks your services on a schedule, stores
+every result in SQLite, exposes Prometheus metrics, and sends a Telegram message when a service goes
+down or comes back — and only then, so there is no alert spam.
 
-## Зачем
+## Why
 
-Пинг URL из cron не говорит, *когда* именно что-то сломалось, срабатывает на единичной потере пакета
-и напоминает о проблеме каждую минуту. NetPulse — небольшая self-hosted альтернатива: ретраи гасят
-кратковременные сбои, алерты только при смене состояния не засоряют канал, а эндпоинт `/metrics`
-встраивается в уже привычный стек Prometheus/Grafana.
+Pinging a URL from cron tells you nothing about *when* something broke, flaps on a single dropped
+packet, and nags you every minute. NetPulse is a small, self-hosted alternative: retries absorb
+transient blips, state-change alerts keep the channel quiet, and a `/metrics` endpoint plugs into
+the Prometheus/Grafana stack you probably already have.
 
-## Возможности
+## Features
 
-- **Три типа целей** — HTTP(S) URL, TCP `host:port`, DNS-имя
-- **HTTP-проверки** — код ответа, время ответа, срок действия TLS-сертификата (цель считается
-  упавшей, если сертификат истекает раньше заданного числа дней)
-- **Параллельные проверки** с ограничением через `asyncio.Semaphore`
-- **Retry с экспоненциальной задержкой**, прежде чем сервис считается упавшим
-- **Алерты в Telegram только при смене состояния** (упал / поднялся)
-- **Страница статуса** на `/` — карточки целей, задержка, аптайм, срок SSL и полоска последних
-  30 проверок; обновляется сама, данные берёт из `/api/status` (JSON)
-- **Prometheus `/metrics`** — up/down, задержка, срок сертификата, счётчики проверок
-- **История в SQLite**, CLI на Typer
+- **Three target types** — HTTP(S) URL, TCP `host:port`, DNS name
+- **HTTP checks** — status code, response time, TLS certificate expiry (fails when it expires within
+  a configurable number of days)
+- **Parallel checks** bounded by an `asyncio.Semaphore`
+- **Retry with exponential backoff** before a service is considered down
+- **Telegram alerts on state change only** (down / recovered)
+- **Status page** on `/` — target cards with latency, uptime, SSL expiry and a strip of the last 30
+  checks; refreshes itself, data comes from `/api/status` (JSON)
+- **Prometheus `/metrics`** — up/down, latency, certificate expiry, check counters
+- **SQLite history**, CLI built with Typer
 
-## Архитектура
+## Architecture
 
 ```mermaid
 flowchart LR
     CFG[config.yaml] --> MON
 
     subgraph NetPulse process
-        MON[Monitor<br/>цикл на каждую цель] -->|каждая попытка| SEM{{Semaphore}}
+        MON[Monitor<br/>one loop per target] -->|each attempt| SEM{{Semaphore}}
         SEM --> CHK[Checker<br/>HTTP / TCP / DNS]
         MON -->|retry + backoff| MON
-        MON -->|итоговый результат| ST[StateTracker]
+        MON -->|final result| ST[StateTracker]
         MON --> DB[(SQLite)]
-        MON --> MET[Реестр метрик]
-        MON --> BRD[StatusBoard<br/>последние результаты]
-        ST -->|состояние изменилось| TG[TelegramNotifier]
+        MON --> MET[Metrics registry]
+        MON --> BRD[StatusBoard<br/>latest results]
+        ST -->|state changed| TG[TelegramNotifier]
         MET --> EP[":9100<br/>/ · /api/status · /metrics"]
         BRD --> EP
     end
 
-    CHK --> NET((Цели))
+    CHK --> NET((Targets))
     TG --> API((Telegram API))
     EP --> PROM((Prometheus))
-    EP --> WEB((Браузер))
+    EP --> WEB((Browser))
     DB --> CLI[netpulse status]
 ```
 
-Один цикл проверки цели: попытка → (при неудаче) пауза `retry_base_delay * 2^n` и новая попытка, не
-более `retries` раз → итоговый результат сохраняется, экспортируется в метрики и передаётся трекеру
-состояния. Алерт уходит, только если состояние up/down *изменилось*.
+One check cycle for a target: attempt → (on failure) sleep `retry_base_delay * 2^n` and attempt again,
+up to `retries` times → the final result is saved, exported as metrics, and fed to the state tracker.
+Only if the up/down state *changed* is an alert sent.
 
-## Быстрый старт
+## Quick start
 
-### Docker (одна команда)
+### Docker (one command)
 
 ```bash
 docker compose up -d
 ```
 
-Запускается с примером [`config.yaml`](config.yaml) и без алертов. Чтобы включить Telegram, создайте
-бота через [@BotFather](https://t.me/BotFather) и выполните:
+This runs with the sample [`config.yaml`](config.yaml) and no alerts. To enable Telegram, create a
+bot with [@BotFather](https://t.me/BotFather), then:
 
 ```bash
-cp .env.example .env      # заполните NETPULSE_TELEGRAM_BOT_TOKEN и NETPULSE_TELEGRAM_CHAT_ID
+cp .env.example .env      # fill in NETPULSE_TELEGRAM_BOT_TOKEN and NETPULSE_TELEGRAM_CHAT_ID
 docker compose up -d
 ```
 
-Отредактируйте `config.yaml`, чтобы мониторить свои сервисы, и выполните `docker compose restart`.
+Edit `config.yaml` to monitor your own services and run `docker compose restart`.
 
 ```bash
-docker compose exec netpulse netpulse status    # последние результаты
-# страница статуса: http://localhost:9100
-curl localhost:9100/metrics                     # метрики Prometheus
-docker compose logs -f                          # смены состояния в логах
+docker compose exec netpulse netpulse status    # latest results
+# status page: http://localhost:9100
+curl localhost:9100/metrics                     # Prometheus metrics
+docker compose logs -f                          # follow state changes
 ```
 
-### Локально
+### Local
 
-Нужен Python 3.12.
+Requires Python 3.12.
 
 ```bash
 pip install -e ".[dev]"
-export NETPULSE_TELEGRAM_BOT_TOKEN=... NETPULSE_TELEGRAM_CHAT_ID=...   # необязательно
+export NETPULSE_TELEGRAM_BOT_TOKEN=... NETPULSE_TELEGRAM_CHAT_ID=...   # optional
 netpulse run -c config.yaml
 ```
 
-## Конфигурация
+## Configuration
 
 ```yaml
-interval: 30              # секунд между проверками каждой цели
-timeout: 10               # секунд до прерывания одной попытки
-concurrency: 10           # максимум одновременных проверок
-retries: 3                # дополнительных попыток до DOWN (паузы 1с, 2с, 4с по умолчанию)
+interval: 30              # seconds between checks of each target
+timeout: 10               # seconds before a single attempt is aborted
+concurrency: 10           # max checks in flight at once
+retries: 3                # extra attempts before DOWN (1s, 2s, 4s backoff by default)
 retry_base_delay: 1
-ssl_expiry_warn_days: 14  # HTTPS-цель падает, если сертификат истекает раньше
+ssl_expiry_warn_days: 14  # HTTPS targets fail when the certificate expires sooner
 database: netpulse.db
-metrics_host: 127.0.0.1
+metrics_host: 127.0.0.1   # the status page and /metrics share this address
 metrics_port: 9100
 
 targets:
@@ -108,20 +108,20 @@ targets:
   - {name: Domain, type: dns, host: example.com}
 ```
 
-Неизвестные ключи, дубликаты имён целей и некорректные значения отклоняются при старте с понятной
-ошибкой. Секреты читаются только из окружения (см. [`.env.example`](.env.example)). Если переменные
-Telegram не заданы, NetPulse пишет предупреждение в лог и работает без алертов.
+Unknown keys, duplicate target names and invalid values are rejected at startup with a readable
+error. Secrets are read only from the environment (see [`.env.example`](.env.example)). If the
+Telegram variables are unset, NetPulse logs a warning and runs without alerts.
 
 ## CLI
 
 ```text
-netpulse run    [-c config.yaml]     Мониторить все цели, пока процесс не остановят
-netpulse check  <target>             Разовая проверка; код выхода 1, если цель недоступна
-netpulse status [-c config.yaml]     Последнее состояние и аптайм за 24 часа из SQLite
+netpulse run    [-c config.yaml]     Monitor all targets until stopped
+netpulse check  <target>             One-off check; exit code 1 if down
+netpulse status [-c config.yaml]     Latest state and 24h uptime from SQLite
 ```
 
-`<target>` — URL `http(s)://`, `host:port` (TCP) или просто имя (DNS). Вместо `-c` можно задать
-переменную `NETPULSE_CONFIG`.
+`<target>` is an `http(s)://` URL, `host:port` (TCP), or a bare name (DNS). `-c` can also be set
+with `NETPULSE_CONFIG`.
 
 ```console
 $ netpulse check https://example.com
@@ -137,26 +137,26 @@ Postgres DOWN   -        0.0%        2026-10-11 01:05:17  ConnectionRefusedError
 Website  UP     332 ms   99.9%       2026-10-11 01:05:17
 ```
 
-## Метрики
+## Metrics
 
-`GET /metrics` (текстовый формат Prometheus):
+`GET /metrics` (Prometheus text format):
 
-| Метрика | Тип | Значение |
+| Metric | Type | Meaning |
 | --- | --- | --- |
-| `netpulse_up{target}` | gauge | 1, если последняя проверка успешна, иначе 0 |
-| `netpulse_latency_seconds{target}` | gauge | Время ответа последней проверки (отсутствует, пока цель не отвечает) |
-| `netpulse_ssl_expiry_days{target}` | gauge | Дней до истечения HTTPS-сертификата |
-| `netpulse_checks_total{target,result}` | counter | Завершённые проверки по исходу `ok` / `fail` |
+| `netpulse_up{target}` | gauge | 1 if the last check succeeded, else 0 |
+| `netpulse_latency_seconds{target}` | gauge | Response time of the last check (absent while the target doesn't answer) |
+| `netpulse_ssl_expiry_days{target}` | gauge | Days until the HTTPS certificate expires |
+| `netpulse_checks_total{target,result}` | counter | Completed checks by `ok` / `fail` |
 
-Аптайм за период — это запрос, а не хранимое число:
+Uptime over a window is a query, not a stored number:
 
 ```promql
-avg_over_time(netpulse_up{target="Website"}[24h])      # доля аптайма за 24 часа
-netpulse_latency_seconds{target="Website"}             # задержка
-netpulse_ssl_expiry_days < 21                          # сертификаты, истекающие скоро
+avg_over_time(netpulse_up{target="Website"}[24h])      # 24h uptime ratio
+netpulse_latency_seconds{target="Website"}             # latency
+netpulse_ssl_expiry_days < 21                          # certificates expiring soon
 ```
 
-Конфиг скрейпа Prometheus:
+Prometheus scrape config:
 
 ```yaml
 scrape_configs:
@@ -165,45 +165,42 @@ scrape_configs:
       - targets: ["netpulse:9100"]
 ```
 
-## Технические решения
+## Technical decisions
 
-- **asyncio и один `httpx.AsyncClient`.** Проверки завязаны на ввод-вывод; одного цикла событий
-  хватает на сотни целей без потоков. Клиент общий (пул соединений) и корректно закрывается при выходе.
-- **Семафор на *попытку*, а не на цикл.** Цель, ждущая между ретраями, не занимает слот, поэтому один
-  «мигающий» сервис не может заморить остальные проверки.
-- **Алерты по смене состояния, считаемой по *итоговому* результату.** Сначала ретраи: цель считается
-  упавшей, только когда провалились все попытки. Первая проверка цели с неизвестным состоянием шлёт
-  алерт, только если цель недоступна.
-- **Состояние переживает перезапуск.** Трекер заполняется последними строками из SQLite, поэтому
-  после рестарта NetPulse не объявляет повторно о сервисе, который всё ещё лежит.
-- **Истечение сертификата — это падение, а не отдельный тип алерта.** В пределах
-  `ssl_expiry_warn_days` цель переходит в DOWN, а причина указывается в сообщении. Один конвейер
-  алертов и один автомат состояний.
-- **Задержка HTTP — время до заголовков ответа.** Тело читается потоком и не скачивается, поэтому
-  большая страница не искажает измерение и не тратит трафик. Редиректы выполняются.
-- **Единый дедлайн на попытку** через `asyncio.timeout`, поэтому `timeout` означает одно и то же для
-  HTTP, TCP и DNS (собственные таймауты httpx действуют по фазам).
-- **Сетевые сбои — это результаты, а не исключения.** `Checker.check` возвращает неудачный
-  `CheckResult`; цикл могут уронить только программные ошибки. Ошибки доставки в Telegram логируются
-  и подавляются, чтобы сломанный канал алертов не останавливал мониторинг.
-- **Токен бота не попадает в логи.** URL Telegram содержит токен, поэтому логируются только тип
-  исключения или HTTP-статус, а INFO-логирование запросов `httpx` отключено.
-- **Обычный `sqlite3`, режим WAL.** Запись — вставка одной строки за доли миллисекунды, так что
-  блокировка цикла на это дешевле, чем переход в поток или лишняя зависимость. WAL позволяет
-  `netpulse status` читать, пока монитор пишет.
-- **`prometheus_client` для эндпоинта.** Корректный формат экспозиции и готовый HTTP-сервер в
-  фоновом потоке вместо самодельного HTTP. Конфиг валидируется pydantic, поэтому опечатки
-  всплывают при старте, а не в три часа ночи.
-- **Метрики по соглашениям Prometheus.** `netpulse_up` и счётчик позволяют Prometheus считать аптайм
-  за любое окно; никаких собственных скользящих окон, в которых легко ошибиться.
+- **asyncio + one `httpx.AsyncClient`.** Checks are I/O-bound; a single event loop handles hundreds
+  of targets without threads. The client is shared for connection pooling and closed cleanly on exit.
+- **Semaphore per *attempt*, not per cycle.** A target sleeping in retry backoff does not hold a
+  slot, so one flapping service can't starve the others.
+- **Alerts on state change, derived from the *final* result.** Retries run first; a target is DOWN
+  only after all attempts fail. The first check of an unknown target alerts only if it is down.
+- **State survives restarts.** The tracker is seeded from the latest SQLite rows, so restarting
+  NetPulse doesn't re-announce a service that is still down.
+- **Certificate expiry is a failure, not a separate alert type.** Within `ssl_expiry_warn_days` the
+  target goes DOWN with the reason in the message. One alert pipeline, one state machine.
+- **HTTP latency = time to response headers.** The body is streamed and never downloaded, so a
+  large page can't skew the measurement or burn bandwidth. Redirects are followed.
+- **One overall deadline per attempt** via `asyncio.timeout`, so `timeout` means the same thing for
+  HTTP, TCP and DNS (httpx's own timeouts apply per phase).
+- **Network failures are results, not exceptions.** `Checker.check` returns a failed `CheckResult`;
+  only programming errors can crash the loop. Telegram delivery failures are logged and swallowed so
+  a broken alert channel never stops monitoring.
+- **No bot token in logs.** The Telegram URL contains the token, so only the exception type or HTTP
+  status is logged and `httpx`'s per-request INFO logging is silenced.
+- **Plain `sqlite3`, WAL mode.** Writes are single-row inserts taking well under a millisecond, so
+  blocking the loop for them is cheaper than a thread hop or an extra dependency. WAL lets
+  `netpulse status` read while the monitor writes.
+- **`prometheus_client` for the exposition format, stdlib `http.server` for the endpoint.** One small
+  threaded server serves the status page, the JSON and `/metrics`, with no web framework. Config is validated with pydantic, so typos fail
+  at startup rather than at 3 a.m.
+- **Metrics follow Prometheus conventions.** `netpulse_up` plus a counter lets Prometheus compute
+  uptime over any window; no in-process rolling windows to get wrong.
 
-### Ограничения
+### Limitations
 
-Результаты не удаляются (примерно одна строка на цель за интервал): при необходимости чистите старые
-строки или ротируйте файл базы. Конфиг читается при старте — для применения изменений перезапустите
-сервис.
+Results are never pruned (about one row per target per interval); delete old rows or rotate the
+database file if that matters to you. Config is read at startup — restart to apply changes.
 
-## Разработка
+## Development
 
 ```bash
 pip install -e ".[dev]"
@@ -212,7 +209,7 @@ mypy src
 pytest
 ```
 
-Тесты подменяют сеть (`httpx.MockTransport`, заглушки `asyncio.open_connection` / `getaddrinfo`) и
-проверяют то, что действительно важно: тайминги retry/backoff, переходы up/down без повторных
-алертов, сохранение состояния при перезапуске, лимит параллелизма, обработку срока сертификата и
-отсутствие токена в логах. CI (GitHub Actions) запускает линтер, проверку типов и тесты на каждый push.
+Tests mock the network (`httpx.MockTransport`, patched `asyncio.open_connection` / `getaddrinfo`)
+and focus on behaviour that matters: retry/backoff timing, up/down transitions without duplicate
+alerts, alerts surviving a restart, the concurrency limit, certificate-expiry handling, and token
+safety in logs. CI (GitHub Actions) runs lint, type check and tests on every push.

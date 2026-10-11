@@ -1,4 +1,4 @@
-"""Хранение результатов проверок в SQLite."""
+"""SQLite persistence for check results."""
 
 import sqlite3
 from datetime import datetime
@@ -27,7 +27,7 @@ class Storage:
     def __init__(self, path: Path | str) -> None:
         self._conn = sqlite3.connect(path)
         self._conn.row_factory = sqlite3.Row
-        # WAL позволяет `netpulse status` читать, пока монитор пишет.
+        # WAL lets `netpulse status` read while the monitor is writing.
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA)
 
@@ -62,7 +62,7 @@ class Storage:
             )
 
     def latest(self) -> list[CheckResult]:
-        """Последний результат каждой цели, отсортированный по имени цели."""
+        """The most recent result of every target, ordered by target name."""
         rows = self._conn.execute(
             "SELECT r.* FROM results r"
             " JOIN (SELECT MAX(id) AS id FROM results GROUP BY target) last ON r.id = last.id"
@@ -85,7 +85,7 @@ class Storage:
         return {result.target: result.ok for result in self.latest()}
 
     def uptime_ratios(self, since: datetime) -> dict[str, float]:
-        """Доля успешных проверок по каждой цели начиная с указанного момента (UTC)."""
+        """Share of successful checks per target since the given moment (UTC)."""
         rows = self._conn.execute(
             "SELECT target, AVG(ok) AS ratio FROM results WHERE checked_at >= ? GROUP BY target",
             (since.isoformat(),),

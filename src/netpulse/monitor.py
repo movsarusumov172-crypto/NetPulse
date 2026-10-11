@@ -1,4 +1,4 @@
-"""Цикл мониторинга: планирует проверки и реагирует на их результаты."""
+"""The monitoring loop: schedules checks and reacts to their results."""
 
 import asyncio
 import logging
@@ -46,8 +46,7 @@ class Monitor:
         self._board = board
         self._sleep = sleep
         self._semaphore = asyncio.Semaphore(settings.concurrency)
-        # Берём состояние из базы, чтобы после перезапуска не слать повторный алерт
-        # о цели, которая всё ещё лежит.
+        # Seed from the database so a restart does not re-alert about a target that is still down.
         self._tracker = StateTracker(storage.last_states())
 
     async def run(self) -> None:
@@ -62,7 +61,7 @@ class Monitor:
             await self._sleep(max(0.0, self._settings.interval - (time.monotonic() - started)))
 
     async def check_target(self, target: Target) -> CheckResult:
-        """Полный цикл проверки: попытки с ретраями, затем сохранение, метрики и алерт."""
+        """One full check cycle: attempts with retries, then persist, expose and alert."""
         result = await check_with_retry(
             partial(self._attempt, target),
             retries=self._settings.retries,
@@ -84,8 +83,7 @@ class Monitor:
         return result
 
     async def _attempt(self, target: Target) -> CheckResult:
-        # Слот занимается на одну попытку, а не на цикл: пауза между ретраями
-        # не блокирует другие проверки.
+        # The slot is held per attempt, not per cycle, so retry backoff never blocks other checks.
         async with self._semaphore:
             return await self._check(target)
 
@@ -98,7 +96,7 @@ class Monitor:
 
 
 async def run_monitor(settings: Settings) -> None:
-    """Собрать реальные зависимости и мониторить до отмены."""
+    """Wire up real dependencies and monitor until cancelled."""
     metrics = Metrics()
     board = StatusBoard(list(settings.targets), settings.interval)
     server = StatusServer(metrics.registry, board)
