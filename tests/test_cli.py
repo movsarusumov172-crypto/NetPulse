@@ -92,3 +92,15 @@ def test_status_shows_both_uptime_windows_and_survives_old_results(tmp_path: Pat
     assert "80.00%" in web_line  # 7d: 4 of 5
     idle_line = next(line for line in result.output.splitlines() if line.startswith("idle"))
     assert "%" not in idle_line  # no checks in either window: dashes, not a crash or 0%
+
+
+def test_a_broken_config_is_explained_in_plain_text_with_exit_code_2(tmp_path: Path) -> None:
+    config = tmp_path / "config.yaml"
+    config.write_text("interval: 0\ntargets: [{name: db, type: tcp, host: db}]\n", encoding="utf-8")
+
+    result = runner.invoke(cli.app, ["status", "--config", str(config)])
+
+    assert result.exit_code == 2
+    assert "Ошибка" in result.output
+    assert "строка 1" in result.output
+    assert "Traceback" not in result.output

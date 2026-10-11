@@ -59,13 +59,14 @@ class Monitor:
         while True:
             started = time.monotonic()
             await self.check_target(target)
-            await self._sleep(max(0.0, self._settings.interval - (time.monotonic() - started)))
+            interval = self._settings.interval_for(target)
+            await self._sleep(max(0.0, interval - (time.monotonic() - started)))
 
     async def check_target(self, target: Target) -> CheckResult:
         """One full check cycle: attempts with retries, then persist, expose and alert."""
         result = await check_with_retry(
             partial(self._attempt, target),
-            retries=self._settings.retries,
+            retries=self._settings.retries_for(target),
             base_delay=self._settings.retry_base_delay,
             sleep=self._sleep,
         )

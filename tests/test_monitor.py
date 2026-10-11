@@ -257,3 +257,48 @@ async def test_restart_does_not_realert_for_a_target_that_is_still_slow(storage:
     await restarted.check_target(TARGET)
 
     assert second.messages == []
+
+
+async def test_target_retries_override_the_global_retries(storage: Storage) -> None:
+    patient = DnsTarget(name="patient", host="p.test", retries=4)
+    impatient = DnsTarget(name="impatient", host="i.test", retries=0)
+    settings = Settings(targets=[patient, impatient], retries=2)
+    check = ScriptedCheck(False)
+    monitor = Monitor(
+        settings, check=check, storage=storage, metrics=Metrics(), notifier=None, sleep=no_sleep
+    )
+
+    await monitor.check_target(patient)
+    assert check.attempts == 5  # 1 + 4 retries, not the global 1 + 2
+
+    check.attempts = 0
+    await monitor.check_target(impatient)
+    assert check.attempts == 1
+
+
+async def test_each_target_is_checked_on_its_own_interval(storage: Storage) -> None:
+    class Stop(Exception):
+        pass
+
+    sleeps: list[float] = []
+
+    async def record_sleep(delay: float) -> None:
+        sleeps.append(delay)
+        if len(sleeps) == 2:
+            raise Stop
+
+    fast = DnsTarget(name="fast", host="f.test", interval=5)
+    settings = Settings(targets=[fast], interval=300, retries=0)
+    monitor = Monitor(
+        settings,
+        check=ScriptedCheck(True),
+        storage=storage,
+        metrics=Metrics(),
+        notifier=None,
+        sleep=record_sleep,
+    )
+
+    with pytest.raises(Stop):
+        await monitor._run_target(fast)
+
+    assert sleeps == [pytest.approx(5, abs=1), pytest.approx(5, abs=1)]

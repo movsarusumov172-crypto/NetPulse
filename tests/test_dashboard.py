@@ -254,3 +254,13 @@ def test_a_slow_answer_is_degraded_not_down_and_uses_the_effective_threshold() -
     assert targets["plain"]["degraded_ms"] == 500
     assert targets["custom"]["state"] == "down"
     assert targets["custom"]["degraded_ms"] == 2000
+
+
+def test_each_card_reports_its_own_check_interval() -> None:
+    custom = DnsTarget(name="custom", host="c.test", interval=5)
+    board = StatusBoard([WEB, custom], interval=30)
+
+    targets = by_name(board)
+
+    assert targets["web"]["interval"] == 30
+    assert targets["custom"]["interval"] == 5

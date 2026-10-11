@@ -66,7 +66,10 @@ class StatusBoard:
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
-            targets = [_describe(status, self._degraded_ms) for status in self._statuses.values()]
+            targets = [
+                _describe(status, self._interval, self._degraded_ms)
+                for status in self._statuses.values()
+            ]
         return {
             "generated_at": datetime.now(UTC).isoformat(),
             "interval": self._interval,
@@ -82,7 +85,9 @@ def _state(last: CheckResult | None) -> str:
     return "degraded" if last.degraded else "up"
 
 
-def _describe(status: _TargetStatus, default_degraded_ms: float | None) -> dict[str, Any]:
+def _describe(
+    status: _TargetStatus, default_interval: float, default_degraded_ms: float | None
+) -> dict[str, Any]:
     last = status.last
     state = _state(last)
     degraded_ms = status.target.degraded_ms
@@ -91,6 +96,9 @@ def _describe(status: _TargetStatus, default_degraded_ms: float | None) -> dict[
         "type": status.target.type,
         "address": status.target.address,
         "state": state,
+        "interval": status.target.interval
+        if status.target.interval is not None
+        else default_interval,
         "degraded_ms": degraded_ms if degraded_ms is not None else default_degraded_ms,
         "latency_ms": last.latency_ms if last else None,
         "status_code": last.status_code if last else None,

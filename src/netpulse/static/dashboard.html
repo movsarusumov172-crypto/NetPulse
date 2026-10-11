@@ -214,7 +214,7 @@
       const foot = el("div", "foot");
       const SINCE = { up: "Работает", degraded: "Медленно", down: "Лежит" };
       const since = target.state === "pending" ? "" : `${SINCE[target.state]} уже ${ago(target.since)}`;
-      foot.append(el("span", null, since), el("span", null, `проверок с запуска: ${target.checks}`));
+      foot.append(el("span", null, since), el("span", null, `проверка каждые ${target.interval} с`));
       box.append(foot);
       return box;
     }
@@ -240,7 +240,7 @@
         document.getElementById("grid").replaceChildren(...data.targets.map(card));
         const updated = document.getElementById("updated");
         updated.className = "";
-        updated.textContent = `Обновлено ${new Date().toLocaleTimeString("ru-RU")} · проверка каждые ${data.interval} с`;
+        updated.textContent = `Обновлено ${new Date().toLocaleTimeString("ru-RU")}`;
       } catch {
         const updated = document.getElementById("updated");
         updated.className = "offline";

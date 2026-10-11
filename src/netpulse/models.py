@@ -1,25 +1,71 @@
 """Domain models: monitored targets and check results."""
 
+import os
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    HttpUrl,
+    field_validator,
+    model_validator,
+)
+
+_ENV_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+HttpMethod = Literal["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+
+
+def _expand_env(value: str) -> str:
+    """Replace `${NAME}` with the environment variable, so secrets stay out of config files."""
+
+    def replace(match: re.Match[str]) -> str:
+        name = match.group(1)
+        if name not in os.environ:
+            raise ValueError(f"переменная окружения {name} не задана")
+        return os.environ[name]
+
+    return _ENV_REFERENCE.sub(replace, value)
 
 
 class _TargetBase(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     name: str = Field(min_length=1)
-    degraded_ms: float | None = Field(
-        default=None, gt=0, description="Latency above this is DEGRADED; overrides the global one."
-    )
+    # Per-target overrides of the global settings; None = use the global value.
+    interval: float | None = Field(default=None, gt=0)
+    timeout: float | None = Field(default=None, gt=0)
+    retries: int | None = Field(default=None, ge=0)
+    degraded_ms: float | None = Field(default=None, gt=0)
 
 
 class HttpTarget(_TargetBase):
     type: Literal["http"] = "http"
     url: HttpUrl
     expected_status: int = Field(default=200, ge=100, le=599)
+    method: HttpMethod = "GET"
+    headers: dict[str, str] = Field(default_factory=dict)
+    body_contains: str | None = Field(default=None, min_length=1)
+
+    @field_validator("method", mode="before")
+    @classmethod
+    def _method_is_case_insensitive(cls, value: object) -> object:
+        return value.upper() if isinstance(value, str) else value
+
+    @field_validator("headers")
+    @classmethod
+    def _expand_env_in_headers(cls, headers: dict[str, str]) -> dict[str, str]:
+        return {name: _expand_env(value) for name, value in headers.items()}
+
+    @model_validator(mode="after")
+    def _head_responses_have_no_body(self) -> "HttpTarget":
+        if self.method == "HEAD" and self.body_contains is not None:
+            raise ValueError("body_contains нельзя использовать с методом HEAD: у ответа нет тела")
+        return self
 
     @property
     def address(self) -> str:

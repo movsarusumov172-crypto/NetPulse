@@ -196,3 +196,129 @@ def test_target_from_string(value: str, expected_type: type, address: str) -> No
     target = target_from_string(value)
     assert isinstance(target, expected_type)
     assert target.address == address
+
+
+class ChunkedBody(httpx.AsyncByteStream):
+    """A response body delivered in the given chunks, to exercise matches across boundaries."""
+
+    def __init__(self, *chunks: bytes) -> None:
+        self._chunks = chunks
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for chunk in self._chunks:
+            yield chunk
+
+
+async def test_http_sends_the_configured_method_and_headers(client_for: ClientFactory) -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(204)
+
+    target = HttpTarget(
+        name="api",
+        url="https://api.test/health",
+        method="post",
+        headers={"Authorization": "Bearer abc", "X-Env": "prod"},
+        expected_status=204,
+    )
+
+    result = await Checker(client_for(handler), 5, WARN_DAYS).check(target)
+
+    assert result.ok
+    assert seen[0].method == "POST"
+    assert seen[0].headers["Authorization"] == "Bearer abc"
+    assert seen[0].headers["X-Env"] == "prod"
+
+
+async def test_target_timeout_overrides_the_default(client_for: ClientFactory) -> None:
+    async def slow(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(0.5)
+        return httpx.Response(200)
+
+    target = HttpTarget(name="web", url="https://example.test", timeout=0.01)
+
+    result = await Checker(client_for(slow), 30, WARN_DAYS).check(target)
+
+    assert not result.ok
+    assert result.error == "timed out after 0.01s"
+
+
+async def test_target_timeout_can_also_be_longer_than_the_default(
+    client_for: ClientFactory,
+) -> None:
+    async def slowish(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(0.05)
+        return httpx.Response(200)
+
+    target = HttpTarget(name="web", url="https://example.test", timeout=5)
+
+    assert (await Checker(client_for(slowish), 0.01, WARN_DAYS).check(target)).ok
+
+
+def body_target(needle: str) -> HttpTarget:
+    return HttpTarget(name="web", url="https://example.test", body_contains=needle)
+
+
+async def test_expected_text_present_in_the_body(client_for: ClientFactory) -> None:
+    checker = Checker(
+        client_for(lambda r: httpx.Response(200, text="<b>All systems OK</b>")), 5, 14
+    )
+
+    assert (await checker.check(body_target("systems OK"))).ok
+
+
+async def test_expected_text_missing_from_the_body_fails_the_check(
+    client_for: ClientFactory,
+) -> None:
+    checker = Checker(client_for(lambda r: httpx.Response(200, text="maintenance page")), 5, 14)
+
+    result = await checker.check(body_target("All systems OK"))
+
+    assert not result.ok
+    assert result.status_code == 200
+    assert result.error == "response body does not contain 'All systems OK'"
+
+
+async def test_expected_text_split_across_chunks_is_still_found(client_for: ClientFactory) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=ChunkedBody(b"..stat", b"us: h", b"ealthy.."))
+
+    assert (await Checker(client_for(handler), 5, 14).check(body_target("status: healthy"))).ok
+
+
+async def test_expected_text_is_matched_in_the_response_charset(client_for: ClientFactory) -> None:
+    body = "Сервис работает".encode("windows-1251")
+    headers = {"content-type": "text/html; charset=windows-1251"}
+    checker = Checker(
+        client_for(lambda r: httpx.Response(200, content=body, headers=headers)), 5, 14
+    )
+
+    assert (await checker.check(body_target("работает"))).ok
+
+
+async def test_expected_text_beyond_the_read_limit_is_not_found(
+    client_for: ClientFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("netpulse.checks._MAX_BODY_CHARS", 10)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=ChunkedBody(b"x" * 20, b"needle"))
+
+    assert not (await Checker(client_for(handler), 5, 14).check(body_target("needle"))).ok
+
+
+async def test_wrong_status_is_reported_before_the_body_is_considered(
+    client_for: ClientFactory,
+) -> None:
+    checker = Checker(client_for(lambda r: httpx.Response(500, text="All systems OK")), 5, 14)
+
+    result = await checker.check(body_target("All systems OK"))
+
+    assert result.error == "unexpected status 500 (expected 200)"
+
+
+def test_head_requests_cannot_expect_body_text() -> None:
+    with pytest.raises(ValueError, match="HEAD"):
+        HttpTarget(name="x", url="https://example.test", method="HEAD", body_contains="ok")

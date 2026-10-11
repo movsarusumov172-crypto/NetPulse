@@ -30,7 +30,7 @@ def _load(path: Path) -> Settings:
     try:
         return load_settings(path)
     except ConfigError as exc:
-        typer.echo(f"Error: {exc}", err=True)
+        typer.echo(f"Ошибка: {exc}", err=True)
         raise typer.Exit(2) from exc
 
 
@@ -96,7 +96,7 @@ def status(config: ConfigOption = Path("config.yaml")) -> None:
     """Show the latest result and 24h / 7d uptime of every configured target."""
     settings = _load(config)
     if not settings.database.exists():
-        typer.echo(f"No database at {settings.database}: has `netpulse run` started yet?", err=True)
+        typer.echo(f"Базы данных {settings.database} нет: запускался ли `netpulse run`?", err=True)
         raise typer.Exit(1)
 
     with Storage(settings.database) as storage:
