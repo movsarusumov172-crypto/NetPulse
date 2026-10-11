@@ -239,3 +239,18 @@ def test_status_without_a_database_has_no_uptime(server: tuple[str, Metrics]) ->
 
     assert web["uptime_24h"] is None
     assert web["uptime_7d"] is None
+
+
+def test_a_slow_answer_is_degraded_not_down_and_uses_the_effective_threshold() -> None:
+    plain = DnsTarget(name="plain", host="p.test")
+    custom = DnsTarget(name="custom", host="c.test", degraded_ms=2000)
+    board = StatusBoard([plain, custom], interval=30, degraded_ms=500)
+    board.record(CheckResult("plain", ok=True, latency_ms=900.0, degraded=True, checked_at=T0))
+    board.record(CheckResult("custom", ok=False, error="boom", checked_at=T0))
+
+    targets = by_name(board)
+
+    assert targets["plain"]["state"] == "degraded"
+    assert targets["plain"]["degraded_ms"] == 500
+    assert targets["custom"]["state"] == "down"
+    assert targets["custom"]["degraded_ms"] == 2000

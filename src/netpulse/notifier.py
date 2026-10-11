@@ -40,13 +40,27 @@ def format_alert(
     event: Event,
     *,
     downtime: timedelta | None = None,
+    threshold_ms: float | None = None,
 ) -> str:
+    latency = f" ({result.latency_ms:.0f} ms)" if result.latency_ms is not None else ""
     if event is Event.WENT_DOWN:
         return f"\N{LARGE RED CIRCLE} {target.name} is DOWN\n{target.address}\n{result.error}"
-    latency = f" ({result.latency_ms:.0f} ms)" if result.latency_ms is not None else ""
+    if event is Event.DEGRADED:
+        limit = f" above the {threshold_ms:.0f} ms threshold" if threshold_ms is not None else ""
+        return (
+            f"\N{LARGE YELLOW CIRCLE} {target.name} is DEGRADED{latency}\n{target.address}\n"
+            f"Responding, but slower than expected: latency is{limit}."
+        )
+    if event is Event.NORMALIZED:
+        return (
+            f"\N{LARGE GREEN CIRCLE} {target.name} latency is back to normal{latency}\n"
+            f"{target.address}"
+        )
     text = f"\N{LARGE GREEN CIRCLE} {target.name} is back UP{latency}\n{target.address}"
     if downtime is not None:
         text += f"\nDowntime: {format_duration(downtime)}"
+    if result.degraded:
+        text += "\nStill slow: latency is above the threshold."
     return text
 
 

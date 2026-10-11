@@ -47,6 +47,10 @@ def _migration_2_incidents(conn: sqlite3.Connection) -> None:
     _backfill_incidents(conn)
 
 
+def _migration_3_degraded(conn: sqlite3.Connection) -> None:
+    conn.execute("ALTER TABLE results ADD COLUMN degraded INTEGER NOT NULL DEFAULT 0")
+
+
 def _backfill_incidents(conn: sqlite3.Connection) -> None:
     """Rebuild past incidents from stored results so existing history shows up right away.
 
@@ -74,6 +78,7 @@ def _backfill_incidents(conn: sqlite3.Connection) -> None:
 _MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _migration_1_results,
     _migration_2_incidents,
+    _migration_3_degraded,
 )
 
 
@@ -135,7 +140,7 @@ class Storage:
         with self._conn:
             self._conn.execute(
                 "INSERT INTO results (target, checked_at, ok, latency_ms, status_code,"
-                " ssl_days_left, error) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                " ssl_days_left, error, degraded) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     result.target,
                     result.checked_at.isoformat(),
@@ -144,6 +149,7 @@ class Storage:
                     result.status_code,
                     result.ssl_days_left,
                     result.error,
+                    int(result.degraded),
                 ),
             )
 
@@ -163,12 +169,17 @@ class Storage:
                 ssl_days_left=row["ssl_days_left"],
                 error=row["error"],
                 checked_at=datetime.fromisoformat(row["checked_at"]),
+                degraded=bool(row["degraded"]),
             )
             for row in rows
         ]
 
     def last_states(self) -> dict[str, bool]:
         return {result.target: result.ok for result in self.latest()}
+
+    def last_degraded(self) -> set[str]:
+        """Targets whose most recent result was a successful but slow one."""
+        return {result.target for result in self.latest() if result.degraded}
 
     def uptime_ratios(self, since: datetime) -> dict[str, float]:
         """Share of successful checks per target since the given moment (UTC)."""

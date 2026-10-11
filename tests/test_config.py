@@ -58,3 +58,34 @@ def test_invalid_config_is_rejected(tmp_path: Path, body: str) -> None:
 def test_missing_file_is_a_config_error(tmp_path: Path) -> None:
     with pytest.raises(ConfigError):
         load_settings(tmp_path / "nope.yaml")
+
+
+def test_degraded_threshold_can_be_global_and_overridden_per_target(tmp_path: Path) -> None:
+    settings = load_settings(
+        write(
+            tmp_path,
+            """
+degraded_ms: 500
+targets:
+  - {name: fast, type: dns, host: a.test}
+  - {name: slow-by-nature, type: dns, host: b.test, degraded_ms: 3000}
+""",
+        )
+    )
+    fast, slow = settings.targets
+
+    assert settings.degraded_ms_for(fast) == 500
+    assert settings.degraded_ms_for(slow) == 3000
+
+
+def test_degradation_is_off_unless_a_threshold_is_configured(tmp_path: Path) -> None:
+    settings = load_settings(write(tmp_path, "targets: [{name: x, type: dns, host: h}]"))
+
+    assert settings.degraded_ms_for(settings.targets[0]) is None
+
+
+@pytest.mark.parametrize("value", ["0", "-5"])
+def test_non_positive_degraded_threshold_is_rejected(tmp_path: Path, value: str) -> None:
+    body = f"degraded_ms: {value}\ntargets: [{{name: x, type: dns, host: h}}]"
+    with pytest.raises(ConfigError):
+        load_settings(write(tmp_path, body))

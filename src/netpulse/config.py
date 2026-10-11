@@ -5,7 +5,7 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from netpulse.models import TargetField
+from netpulse.models import Target, TargetField
 
 
 class ConfigError(Exception):
@@ -21,6 +21,9 @@ class Settings(BaseModel):
     retries: int = Field(default=3, ge=0, description="Extra attempts before a target is DOWN.")
     retry_base_delay: float = Field(default=1.0, ge=0, description="First retry delay, doubles.")
     ssl_expiry_warn_days: int = Field(default=14, ge=0)
+    degraded_ms: float | None = Field(
+        default=None, gt=0, description="Latency above this is DEGRADED. Unset = never degraded."
+    )
     database: Path = Path("netpulse.db")
     metrics_host: str = "127.0.0.1"
     metrics_port: int = Field(default=9100, ge=0, le=65535)
@@ -33,6 +36,9 @@ class Settings(BaseModel):
         if duplicates:
             raise ValueError(f"duplicate target names: {', '.join(duplicates)}")
         return self
+
+    def degraded_ms_for(self, target: Target) -> float | None:
+        return target.degraded_ms if target.degraded_ms is not None else self.degraded_ms
 
 
 def load_settings(path: Path) -> Settings:

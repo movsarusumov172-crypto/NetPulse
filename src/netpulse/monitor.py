@@ -16,7 +16,7 @@ from netpulse.metrics import Metrics
 from netpulse.models import CheckResult, Target
 from netpulse.notifier import Notifier, format_alert, telegram_from_env
 from netpulse.retry import check_with_retry
-from netpulse.state import Event, StateTracker
+from netpulse.state import Event, StateTracker, classify
 from netpulse.storage import Storage
 
 logger = logging.getLogger(__name__)
@@ -48,7 +48,7 @@ class Monitor:
         self._sleep = sleep
         self._semaphore = asyncio.Semaphore(settings.concurrency)
         # Seed from the database so a restart does not re-alert about a target that is still down.
-        self._tracker = StateTracker(storage.last_states())
+        self._tracker = StateTracker(storage.last_states(), storage.last_degraded())
 
     async def run(self) -> None:
         async with asyncio.TaskGroup() as group:
@@ -69,6 +69,8 @@ class Monitor:
             base_delay=self._settings.retry_base_delay,
             sleep=self._sleep,
         )
+        threshold_ms = self._settings.degraded_ms_for(target)
+        result = classify(result, threshold_ms)
         logger.debug(
             "%s: ok=%s latency=%s error=%s", target.name, result.ok, result.latency_ms, result.error
         )
@@ -81,7 +83,10 @@ class Monitor:
             downtime = self._record_incident(target, result, event)
             self._log_event(target, result, event)
             if self._notifier is not None:
-                await self._notifier.send(format_alert(target, result, event, downtime=downtime))
+                alert = format_alert(
+                    target, result, event, downtime=downtime, threshold_ms=threshold_ms
+                )
+                await self._notifier.send(alert)
         return result
 
     def _record_incident(
@@ -105,6 +110,10 @@ class Monitor:
     def _log_event(target: Target, result: CheckResult, event: Event) -> None:
         if event is Event.WENT_DOWN:
             logger.warning("%s is DOWN: %s", target.name, result.error)
+        elif event is Event.DEGRADED:
+            logger.warning("%s is DEGRADED: latency %.0f ms", target.name, result.latency_ms or 0)
+        elif event is Event.NORMALIZED:
+            logger.info("%s latency is back to normal", target.name)
         else:
             logger.info("%s is back UP", target.name)
 
@@ -112,7 +121,7 @@ class Monitor:
 async def run_monitor(settings: Settings) -> None:
     """Wire up real dependencies and monitor until cancelled."""
     metrics = Metrics()
-    board = StatusBoard(list(settings.targets), settings.interval)
+    board = StatusBoard(list(settings.targets), settings.interval, degraded_ms=settings.degraded_ms)
     with Storage(settings.database) as storage:  # opens (and migrates) the database first
         server = StatusServer(metrics.registry, board, settings.database)
         port = server.start(settings.metrics_host, settings.metrics_port)

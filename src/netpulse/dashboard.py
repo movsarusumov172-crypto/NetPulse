@@ -40,8 +40,11 @@ class _TargetStatus:
 class StatusBoard:
     """Latest results per target. Written by the monitor loop, read by HTTP threads."""
 
-    def __init__(self, targets: list[Target], interval: float) -> None:
+    def __init__(
+        self, targets: list[Target], interval: float, *, degraded_ms: float | None = None
+    ) -> None:
         self._interval = interval
+        self._degraded_ms = degraded_ms
         self._lock = threading.Lock()
         self._statuses = {target.name: _TargetStatus(target) for target in targets}
 
@@ -63,7 +66,7 @@ class StatusBoard:
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
-            targets = [_describe(status) for status in self._statuses.values()]
+            targets = [_describe(status, self._degraded_ms) for status in self._statuses.values()]
         return {
             "generated_at": datetime.now(UTC).isoformat(),
             "interval": self._interval,
@@ -71,14 +74,24 @@ class StatusBoard:
         }
 
 
-def _describe(status: _TargetStatus) -> dict[str, Any]:
+def _state(last: CheckResult | None) -> str:
+    if last is None:
+        return "pending"
+    if not last.ok:
+        return "down"
+    return "degraded" if last.degraded else "up"
+
+
+def _describe(status: _TargetStatus, default_degraded_ms: float | None) -> dict[str, Any]:
     last = status.last
-    state = "pending" if last is None else ("up" if last.ok else "down")
+    state = _state(last)
+    degraded_ms = status.target.degraded_ms
     return {
         "name": status.target.name,
         "type": status.target.type,
         "address": status.target.address,
         "state": state,
+        "degraded_ms": degraded_ms if degraded_ms is not None else default_degraded_ms,
         "latency_ms": last.latency_ms if last else None,
         "status_code": last.status_code if last else None,
         "ssl_days_left": last.ssl_days_left if last else None,

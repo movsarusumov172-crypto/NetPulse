@@ -267,3 +267,35 @@ def test_uptime_is_none_for_a_window_without_checks() -> None:
     assert uptime["paused-for-days"].day is None
     assert uptime["paused-for-days"].week == 1.0
     assert "gone" not in uptime
+
+
+def test_degraded_flag_is_stored_and_restored() -> None:
+    with Storage(":memory:") as storage:
+        storage.save(CheckResult("slow", ok=True, latency_ms=900.0, degraded=True))
+        storage.save(CheckResult("fast", ok=True, latency_ms=10.0))
+
+        latest = {r.target: r for r in storage.latest()}
+
+        assert latest["slow"].degraded
+        assert not latest["fast"].degraded
+        assert storage.last_degraded() == {"slow"}
+        assert storage.last_states() == {"slow": True, "fast": True}  # degraded still counts as up
+
+
+def test_migrated_results_default_to_not_degraded(tmp_path: Path) -> None:
+    path = tmp_path / "old.db"
+    _create_unversioned_database(path)
+
+    with Storage(path) as storage:
+        [result] = storage.latest()
+
+    assert result.degraded is False
+
+
+def test_degraded_checks_count_as_uptime() -> None:
+    now = datetime(2030, 1, 10, 12, tzinfo=UTC)
+    with Storage(":memory:") as storage:
+        for degraded in (False, True, True, False):
+            storage.save(CheckResult("web", ok=True, degraded=degraded, checked_at=now))
+
+        assert storage.uptime(now)["web"].day == 1.0

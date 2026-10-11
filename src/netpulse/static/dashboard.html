@@ -27,21 +27,25 @@
     .brand { display: flex; align-items: center; gap: 12px; }
     .pulse { width: 14px; height: 14px; border-radius: 50%; background: var(--up); box-shadow: 0 0 0 0 rgba(34, 197, 94, .6); animation: pulse 2s infinite; }
     .pulse.bad { background: var(--down); box-shadow: 0 0 0 0 rgba(239, 68, 68, .6); }
+    .pulse.warn { background: var(--warn); box-shadow: 0 0 0 0 rgba(245, 158, 11, .6); }
     @keyframes pulse { 70% { box-shadow: 0 0 0 12px rgba(0, 0, 0, 0); } 100% { box-shadow: 0 0 0 0 rgba(0, 0, 0, 0); } }
     .meta { color: var(--muted); font-size: 14px; display: flex; gap: 16px; }
     .meta a { color: var(--muted); }
     .banner { padding: 18px 22px; border-radius: 14px; font-size: 18px; font-weight: 600; background: rgba(34, 197, 94, .12); border: 1px solid rgba(34, 197, 94, .35); }
     .banner.bad { background: rgba(239, 68, 68, .12); border-color: rgba(239, 68, 68, .4); }
+    .banner.warn { background: rgba(245, 158, 11, .12); border-color: rgba(245, 158, 11, .4); }
     .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(340px, 100%), 1fr)); gap: 16px; }
     .card { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 18px; display: grid; gap: 12px; border-left: 4px solid var(--pending); }
     .card.up { border-left-color: var(--up); }
     .card.down { border-left-color: var(--down); }
+    .card.degraded { border-left-color: var(--warn); }
     .top { display: flex; justify-content: space-between; gap: 12px; align-items: start; }
     .name { font-weight: 600; font-size: 16px; }
     .address { color: var(--muted); font-size: 13px; word-break: break-all; }
     .state { font-size: 12px; font-weight: 700; padding: 4px 10px; border-radius: 999px; white-space: nowrap; }
     .state.up { background: rgba(34, 197, 94, .15); color: var(--up); }
     .state.down { background: rgba(239, 68, 68, .15); color: var(--down); }
+    .state.degraded { background: rgba(245, 158, 11, .15); color: var(--warn); }
     .state.pending { background: rgba(100, 116, 139, .2); color: var(--muted); }
     .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
     .stat small { display: block; color: var(--muted); font-size: 12px; }
@@ -52,6 +56,7 @@
     .bar.fail { background: var(--down); height: 100% !important; opacity: .7; }
     .bar.empty { background: var(--line); height: 20% !important; }
     .error { font-size: 13px; color: #fca5a5; background: rgba(239, 68, 68, .08); border-radius: 8px; padding: 8px 10px; word-break: break-word; }
+    .note { font-size: 13px; color: var(--warn); background: rgba(245, 158, 11, .08); border-radius: 8px; padding: 8px 10px; }
     .foot { color: var(--muted); font-size: 12px; display: flex; justify-content: space-between; gap: 8px; }
     .offline { color: var(--down); }
     h2 { font-size: 18px; }
@@ -93,7 +98,9 @@
   <script>
     "use strict";
 
-    const STATE_TEXT = { up: "Работает", down: "Не отвечает", pending: "Ждём первую проверку" };
+    const STATE_TEXT = {
+      up: "Работает", degraded: "Деградация", down: "Не отвечает", pending: "Ждём первую проверку",
+    };
     const HISTORY_SIZE = 30;
 
     function el(tag, className, text) {
@@ -201,8 +208,12 @@
 
       box.append(top, stats, bars(target.history));
       if (target.state === "down" && target.error) box.append(el("div", "error", target.error));
+      if (target.state === "degraded" && target.degraded_ms != null) {
+        box.append(el("div", "note", `Отвечает медленнее порога ${Math.round(target.degraded_ms)} мс`));
+      }
       const foot = el("div", "foot");
-      const since = target.state === "pending" ? "" : `${target.state === "up" ? "Работает" : "Лежит"} уже ${ago(target.since)}`;
+      const SINCE = { up: "Работает", degraded: "Медленно", down: "Лежит" };
+      const since = target.state === "pending" ? "" : `${SINCE[target.state]} уже ${ago(target.since)}`;
       foot.append(el("span", null, since), el("span", null, `проверок с запуска: ${target.checks}`));
       box.append(foot);
       return box;
@@ -213,13 +224,19 @@
         const response = await fetch("/api/status", { cache: "no-store" });
         const data = await response.json();
         const down = data.targets.filter((t) => t.state === "down");
-        const up = data.targets.filter((t) => t.state === "up");
+        const slow = data.targets.filter((t) => t.state === "degraded");
+        const working = data.targets.length - down.length;
         const banner = document.getElementById("banner");
-        banner.className = down.length ? "banner bad" : "banner";
-        banner.textContent = down.length
-          ? `Проблемы: ${down.map((t) => t.name).join(", ")}. Работают ${up.length} из ${data.targets.length}.`
-          : `Все сервисы работают (${up.length} из ${data.targets.length})`;
-        document.getElementById("pulse").className = down.length ? "pulse bad" : "pulse";
+        const level = down.length ? "bad" : slow.length ? "warn" : "";
+        banner.className = level ? `banner ${level}` : "banner";
+        if (down.length) {
+          banner.textContent = `Проблемы: ${down.map((t) => t.name).join(", ")}. Работают ${working} из ${data.targets.length}.`;
+        } else if (slow.length) {
+          banner.textContent = `Деградация: ${slow.map((t) => t.name).join(", ")}. Все сервисы отвечают.`;
+        } else {
+          banner.textContent = `Все сервисы работают (${working} из ${data.targets.length})`;
+        }
+        document.getElementById("pulse").className = level ? `pulse ${level}` : "pulse";
         document.getElementById("grid").replaceChildren(...data.targets.map(card));
         const updated = document.getElementById("updated");
         updated.className = "";

@@ -23,6 +23,12 @@ class Metrics:
             ["target"],
             registry=self.registry,
         )
+        self._degraded = Gauge(
+            "netpulse_degraded",
+            "1 if the target answers but slower than its latency threshold, 0 otherwise.",
+            ["target"],
+            registry=self.registry,
+        )
         self._latency = Gauge(
             "netpulse_latency_seconds",
             "Response time of the last check; absent while the target is failing to answer.",
@@ -45,6 +51,7 @@ class Metrics:
     def record(self, result: CheckResult) -> None:
         target = result.target
         self._up.labels(target).set(int(result.ok))
+        self._degraded.labels(target).set(int(result.degraded))
         self._checks.labels(target, "ok" if result.ok else "fail").inc()
         self._set_or_clear(self._latency, target, _seconds(result.latency_ms))
         self._set_or_clear(self._ssl_days, target, result.ssl_days_left)

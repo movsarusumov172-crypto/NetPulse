@@ -11,6 +11,9 @@ class _TargetBase(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     name: str = Field(min_length=1)
+    degraded_ms: float | None = Field(
+        default=None, gt=0, description="Latency above this is DEGRADED; overrides the global one."
+    )
 
 
 class HttpTarget(_TargetBase):
@@ -71,6 +74,8 @@ class CheckResult:
     ssl_days_left: int | None = None
     error: str | None = None
     checked_at: datetime = field(default_factory=_utcnow)
+    degraded: bool = False
+    """The target answered (`ok`) but slower than its latency threshold."""
 
 
 @dataclass(frozen=True, slots=True)

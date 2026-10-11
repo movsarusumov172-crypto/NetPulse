@@ -89,3 +89,27 @@ def test_recovery_alert_reports_the_downtime() -> None:
 def test_recovery_alert_without_a_known_incident_has_no_downtime_line() -> None:
     text = format_alert(TARGET, CheckResult("API", ok=True), Event.RECOVERED)
     assert "Downtime" not in text
+
+
+def test_degraded_alert_names_the_latency_and_the_threshold() -> None:
+    result = CheckResult("API", ok=True, latency_ms=912.0, degraded=True)
+
+    text = format_alert(TARGET, result, Event.DEGRADED, threshold_ms=500.0)
+
+    assert "API is DEGRADED" in text
+    assert "912 ms" in text
+    assert "500 ms threshold" in text
+    assert "DOWN" not in text
+
+
+def test_normalised_alert_is_not_a_recovery() -> None:
+    text = format_alert(TARGET, CheckResult("API", ok=True, latency_ms=80.0), Event.NORMALIZED)
+
+    assert "latency is back to normal" in text
+    assert "back UP" not in text
+
+
+def test_recovery_into_a_slow_state_says_so() -> None:
+    result = CheckResult("API", ok=True, latency_ms=900.0, degraded=True)
+
+    assert "Still slow" in format_alert(TARGET, result, Event.RECOVERED)

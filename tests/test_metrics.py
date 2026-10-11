@@ -29,3 +29,15 @@ def test_failure_without_response_drops_stale_latency() -> None:
 
 def test_failure_for_never_successful_target_does_not_raise() -> None:
     Metrics().record(CheckResult("web", ok=False, error="down"))
+
+
+def test_degraded_target_is_up_but_flagged() -> None:
+    metrics = Metrics()
+    metrics.record(CheckResult("web", ok=True, latency_ms=900.0, degraded=True))
+
+    assert sample(metrics, "netpulse_up", target="web") == 1
+    assert sample(metrics, "netpulse_degraded", target="web") == 1
+
+    metrics.record(CheckResult("web", ok=True, latency_ms=50.0))
+
+    assert sample(metrics, "netpulse_degraded", target="web") == 0

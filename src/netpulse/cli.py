@@ -45,6 +45,12 @@ def _percent(ratio: float | None) -> str:
     return "100%" if value == 100 else f"{value:.2f}%"
 
 
+def _state_label(result: CheckResult) -> str:
+    if not result.ok:
+        return "DOWN"
+    return "DEGRADED" if result.degraded else "UP"
+
+
 def _format_result(result: CheckResult) -> str:
     parts = ["OK  " if result.ok else "FAIL", result.target]
     if result.status_code is not None:
@@ -101,7 +107,7 @@ def status(config: ConfigOption = Path("config.yaml")) -> None:
     rows = [
         (
             result.target,
-            "UP" if result.ok else "DOWN",
+            _state_label(result),
             f"{result.latency_ms:.0f} ms" if result.latency_ms is not None else "-",
             _percent(uptime.get(result.target, _NO_UPTIME).day),
             _percent(uptime.get(result.target, _NO_UPTIME).week),
