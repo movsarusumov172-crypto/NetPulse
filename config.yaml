@@ -1,4 +1,6 @@
 # NetPulse configuration. Secrets (the Telegram token) live in .env, never here.
+# Edits to this file are picked up while NetPulse is running; no restart needed
+# (except database, metrics_host, metrics_port and concurrency).
 
 interval: 30              # seconds between checks of each target
 timeout: 10               # seconds before a single check attempt is aborted
@@ -6,6 +8,7 @@ concurrency: 10           # max checks running at the same time
 retries: 3                # extra attempts before a target is declared DOWN
 retry_base_delay: 1       # seconds; doubles on each retry (1s, 2s, 4s, ...)
 ssl_expiry_warn_days: 14  # HTTPS targets fail when the certificate expires sooner
+# degraded_ms: 1500       # slower than this = DEGRADED (up, but slow); unset = off
 
 database: netpulse.db     # relative to the working directory (/data in Docker)
 metrics_host: 0.0.0.0     # use 127.0.0.1 to keep the page local; Docker needs 0.0.0.0
@@ -16,6 +19,16 @@ targets:
     type: http
     url: https://example.com
     expected_status: 200
+    # Optional per-target settings (any target type):
+    #   interval: 10        # check this one more often
+    #   timeout: 5
+    #   retries: 1
+    #   degraded_ms: 800    # overrides the global threshold
+    #   paused: true        # maintenance: no checks, no alerts
+    # Optional, HTTP only:
+    #   method: POST
+    #   headers: {Authorization: "Bearer ${API_TOKEN}"}   # ${VAR} comes from the environment
+    #   body_contains: '"status":"ok"'                    # must appear in the response body
 
   - name: Cloudflare DNS (TCP)
     type: tcp
