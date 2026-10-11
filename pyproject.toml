@@ -1,0 +1,53 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "netpulse"
+version = "0.1.0"
+description = "Async uptime monitor for HTTP, TCP and DNS targets with Telegram alerts and Prometheus metrics."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.27",
+    "prometheus-client>=0.20",
+    "pydantic>=2.7",
+    "pyyaml>=6.0",
+    "typer>=0.12",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.10",
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.5",
+    "types-PyYAML",
+]
+
+[project.scripts]
+netpulse = "netpulse.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/netpulse"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC", "C4", "PT", "RUF"]
+# `timeout` params are plain config values, applied via asyncio.timeout inside.
+ignore = ["ASYNC109"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+mypy_path = "src"

@@ -1,0 +1,15 @@
+services:
+  netpulse:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      - "9100:9100"
+    volumes:
+      - ./config.yaml:/etc/netpulse/config.yaml:ro
+      - netpulse-data:/data
+
+volumes:
+  netpulse-data:

@@ -1,0 +1,27 @@
+# NetPulse configuration. Secrets (Telegram token) live in .env, never here.
+
+interval: 30              # seconds between checks of each target
+timeout: 10               # seconds before a single check attempt is aborted
+concurrency: 10           # max checks running at the same time
+retries: 3                # extra attempts before a target is declared DOWN
+retry_base_delay: 1       # seconds; doubles each retry (1s, 2s, 4s, ...)
+ssl_expiry_warn_days: 14  # HTTPS targets fail when the certificate expires sooner
+
+database: netpulse.db     # relative to the working directory (/data in Docker)
+metrics_host: 0.0.0.0     # use 127.0.0.1 to keep /metrics local; 0.0.0.0 is needed in Docker
+metrics_port: 9100
+
+targets:
+  - name: Example website
+    type: http
+    url: https://example.com
+    expected_status: 200
+
+  - name: Cloudflare DNS (TCP)
+    type: tcp
+    host: 1.1.1.1
+    port: 53
+
+  - name: example.com DNS
+    type: dns
+    host: example.com
