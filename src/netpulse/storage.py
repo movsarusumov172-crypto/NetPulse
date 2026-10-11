@@ -1,6 +1,7 @@
 """SQLite persistence for check results."""
 
 import sqlite3
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from types import TracebackType
@@ -8,19 +9,50 @@ from typing import Self
 
 from netpulse.models import CheckResult
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS results (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    target        TEXT    NOT NULL,
-    checked_at    TEXT    NOT NULL,
-    ok            INTEGER NOT NULL,
-    latency_ms    REAL,
-    status_code   INTEGER,
-    ssl_days_left INTEGER,
-    error         TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_results_target_time ON results (target, checked_at);
-"""
+
+class StorageError(Exception):
+    """The database cannot be used by this version of NetPulse."""
+
+
+def _migration_1_results(conn: sqlite3.Connection) -> None:
+    """The original schema. Idempotent, so databases created before versioning still match."""
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS results ("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " target TEXT NOT NULL,"
+        " checked_at TEXT NOT NULL,"
+        " ok INTEGER NOT NULL,"
+        " latency_ms REAL,"
+        " status_code INTEGER,"
+        " ssl_days_left INTEGER,"
+        " error TEXT)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_results_target_time ON results (target, checked_at)"
+    )
+
+
+# Append-only: the position in this tuple is the schema version (`PRAGMA user_version`).
+_MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (_migration_1_results,)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Bring the database up to the latest schema in one transaction."""
+    conn.execute("BEGIN IMMEDIATE")  # also serialises two processes opening the file at once
+    try:
+        version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+        if version > len(_MIGRATIONS):
+            raise StorageError(
+                f"database schema version {version} is newer than this NetPulse supports"
+                f" ({len(_MIGRATIONS)}); upgrade NetPulse"
+            )
+        for migration in _MIGRATIONS[version:]:
+            migration(conn)
+        conn.execute(f"PRAGMA user_version = {len(_MIGRATIONS)}")
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
 
 
 class Storage:
@@ -29,7 +61,11 @@ class Storage:
         self._conn.row_factory = sqlite3.Row
         # WAL lets `netpulse status` read while the monitor is writing.
         self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.executescript(_SCHEMA)
+        try:
+            _migrate(self._conn)
+        except BaseException:
+            self._conn.close()
+            raise
 
     def __enter__(self) -> Self:
         return self
