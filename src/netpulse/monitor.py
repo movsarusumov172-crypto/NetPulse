@@ -6,11 +6,12 @@ import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from functools import partial
+from pathlib import Path
 
 import httpx
 
 from netpulse.checks import Checker
-from netpulse.config import Settings
+from netpulse.config import ConfigError, Settings, load_settings
 from netpulse.dashboard import StatusBoard, StatusServer
 from netpulse.metrics import Metrics
 from netpulse.models import CheckResult, Target
@@ -26,6 +27,9 @@ SleepFn = Callable[[float], Awaitable[None]]
 
 _ALERT_TIMEOUT = 10.0
 PAUSE_POLL_SECONDS = 5.0  # how soon a pause/resume is noticed, whatever the check interval
+CONFIG_POLL_SECONDS = 2.0  # how often the config file is checked for edits
+# Read once at startup (sockets, database, semaphore size): changing them needs a restart.
+_RESTART_ONLY = ("database", "metrics_host", "metrics_port", "concurrency")
 
 
 class Monitor:
@@ -40,6 +44,8 @@ class Monitor:
         board: StatusBoard | None = None,
         sleep: SleepFn = asyncio.sleep,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        config_path: Path | None = None,
+        on_settings: Callable[[Settings], None] | None = None,
     ) -> None:
         self._settings = settings
         self._check = check
@@ -49,17 +55,57 @@ class Monitor:
         self._board = board
         self._sleep = sleep
         self._clock = clock
+        self._config_path = config_path
+        self._on_settings = on_settings
+        self._config_signature = self._file_signature()
         self._semaphore = asyncio.Semaphore(settings.concurrency)
         # Seed from the database so a restart does not re-alert about a target that is still down.
         self._tracker = StateTracker(storage.last_states(), storage.last_degraded())
+        self._group: asyncio.TaskGroup | None = None
+        self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._running: dict[str, Target] = {}  # the target spec each running task was started with
 
     async def run(self) -> None:
         async with asyncio.TaskGroup() as group:
-            for target in self._settings.targets:
-                group.create_task(self._run_target(target))
+            self._group = group
+            self._sync_tasks()
+            if self._config_path is not None:
+                group.create_task(self._watch_config(), name="config-watcher")
+
+    # --- scheduling ----------------------------------------------------------------------------
+
+    def _sync_tasks(self) -> None:
+        """Make the running per-target loops match the current settings."""
+        if self._group is None:
+            return
+        wanted = {target.name: target for target in self._settings.targets}
+        for name in list(self._tasks):
+            if name not in wanted:
+                self._stop_target(name)
+                self._forget_removed_target(name)
+            elif self._running[name] != wanted[name]:
+                self._stop_target(name)  # restarted below with the new spec
+        for name, target in wanted.items():
+            if name not in self._tasks:
+                self._tasks[name] = self._group.create_task(
+                    self._run_target(target), name=f"target:{name}"
+                )
+                self._running[name] = target
+
+    def _stop_target(self, name: str) -> None:
+        self._tasks.pop(name).cancel()
+        del self._running[name]
+
+    def _forget_removed_target(self, name: str) -> None:
+        self._tracker.forget(name)
+        self._storage.close_incident(name, self._clock())
+        self._metrics.forget(name)
+        logger.info("%s was removed from the config and is no longer monitored", name)
 
     async def _run_target(self, target: Target) -> None:
         paused = False
+        if self._board is not None:
+            self._board.set_paused(target.name, False)  # a restarted loop starts from a clean slate
         while True:
             if self._is_paused(target) != paused:
                 paused = not paused
@@ -99,6 +145,57 @@ class Monitor:
             logger.info("%s is out of maintenance: checks resume", target.name)
         if self._board is not None:
             self._board.set_paused(target.name, paused, self._clock())
+
+    # --- config reload -------------------------------------------------------------------------
+
+    async def _watch_config(self) -> None:
+        while True:
+            await self._sleep(CONFIG_POLL_SECONDS)
+            self.reload_if_changed()
+
+    def _file_signature(self) -> tuple[int, int] | None:
+        if self._config_path is None:
+            return None
+        try:
+            stat = self._config_path.stat()
+        except OSError:  # e.g. an editor is replacing the file right now
+            return None
+        return stat.st_mtime_ns, stat.st_size
+
+    def reload_if_changed(self) -> bool:
+        """Re-read the config if the file changed. A broken file leaves the old config running."""
+        signature = self._file_signature()
+        if self._config_path is None or signature is None or signature == self._config_signature:
+            return False
+        self._config_signature = signature
+        try:
+            new = load_settings(self._config_path)
+        except ConfigError as exc:
+            logger.error("Config not reloaded, keeping the previous one: %s", exc)
+            if self._board is not None:
+                self._board.set_config_error(str(exc))
+            return False
+        if self._board is not None:
+            self._board.set_config_error(None)
+        self.apply_settings(new)
+        logger.info("Config reloaded: %d targets", len(new.targets))
+        return True
+
+    def apply_settings(self, new: Settings) -> None:
+        """Switch to new settings: start loops for added targets, stop those of removed ones."""
+        kept = {}
+        for name in _RESTART_ONLY:
+            if getattr(new, name) != getattr(self._settings, name):
+                logger.warning("Changing `%s` needs a restart; keeping the current value", name)
+                kept[name] = getattr(self._settings, name)
+        self._settings = new.model_copy(update=kept)
+        self._sync_tasks()
+        if self._board is not None:
+            self._board.set_targets(list(new.targets), new.interval, degraded_ms=new.degraded_ms)
+        if self._on_settings is not None:
+            self._on_settings(self._settings)
+
+    # --- one check -----------------------------------------------------------------------------
 
     async def check_target(self, target: Target) -> CheckResult:
         """One full check cycle: attempts with retries, then persist, expose and alert."""
@@ -157,8 +254,11 @@ class Monitor:
             logger.info("%s is back UP", target.name)
 
 
-async def run_monitor(settings: Settings) -> None:
-    """Wire up real dependencies and monitor until cancelled."""
+async def run_monitor(settings: Settings, config_path: Path | None = None) -> None:
+    """Wire up real dependencies and monitor until cancelled.
+
+    With `config_path`, edits to that file are picked up without a restart.
+    """
     metrics = Metrics()
     board = StatusBoard(list(settings.targets), settings.interval, degraded_ms=settings.degraded_ms)
     with Storage(settings.database) as storage:  # opens (and migrates) the database first
@@ -178,6 +278,10 @@ async def run_monitor(settings: Settings) -> None:
                     metrics=metrics,
                     notifier=telegram_from_env(alert_client),
                     board=board,
+                    config_path=config_path,
+                    on_settings=lambda new: checker.configure(
+                        new.timeout, new.ssl_expiry_warn_days
+                    ),
                 )
                 logger.info(
                     "Monitoring %d targets every %gs", len(settings.targets), settings.interval

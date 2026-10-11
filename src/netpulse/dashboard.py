@@ -48,6 +48,7 @@ class StatusBoard:
         self._degraded_ms = degraded_ms
         self._lock = threading.Lock()
         self._statuses = {target.name: _TargetStatus(target) for target in targets}
+        self._config_error: str | None = None
 
     def record(self, result: CheckResult) -> None:
         with self._lock:
@@ -60,6 +61,30 @@ class StatusBoard:
             status.checks += 1
             status.successes += result.ok
             status.history.append(result)
+
+    def set_targets(
+        self, targets: list[Target], interval: float, *, degraded_ms: float | None = None
+    ) -> None:
+        """Replace the target list after a config reload.
+
+        Targets that stay keep their history; new ones start empty; removed ones disappear.
+        """
+        with self._lock:
+            self._interval = interval
+            self._degraded_ms = degraded_ms
+            statuses: dict[str, _TargetStatus] = {}
+            for target in targets:
+                status = self._statuses.get(target.name)
+                if status is None:
+                    status = _TargetStatus(target)
+                status.target = target
+                statuses[target.name] = status
+            self._statuses = statuses
+
+    def set_config_error(self, message: str | None) -> None:
+        """Remember why the last config reload failed (None once it works again)."""
+        with self._lock:
+            self._config_error = message
 
     def set_paused(self, name: str, paused: bool, at: datetime | None = None) -> None:
         with self._lock:
@@ -82,9 +107,11 @@ class StatusBoard:
                 _describe(status, self._interval, self._degraded_ms)
                 for status in self._statuses.values()
             ]
+            config_error = self._config_error
         return {
             "generated_at": datetime.now(UTC).isoformat(),
             "interval": self._interval,
+            "config_error": config_error,
             "targets": targets,
         }
 

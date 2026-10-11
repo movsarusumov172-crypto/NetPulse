@@ -279,3 +279,49 @@ def test_paused_state_wins_over_the_last_result_and_is_reversible() -> None:
     assert paused["since"] == (T0 + timedelta(minutes=5)).isoformat()
     assert resumed["state"] == "down"  # back to what the last check said
     board.set_paused("unknown", True)  # no error for a target that was removed meanwhile
+
+
+def test_set_targets_keeps_history_of_survivors_and_follows_the_new_list() -> None:
+    board = StatusBoard([WEB, DB], interval=30)
+    board.record(at(0, ok=True, target="web"))
+    board.record(at(0, ok=True, target="db"))
+    cache = DnsTarget(name="cache", host="cache.test")
+
+    board.set_targets([cache, WEB], interval=10, degraded_ms=500)
+
+    targets = by_name(board)
+    assert board.target_names() == ["cache", "web"]  # new order, "db" is gone
+    assert targets["web"]["state"] == "up"  # history survived
+    assert targets["web"]["checks"] == 1
+    assert targets["cache"]["state"] == "pending"
+    assert targets["web"]["interval"] == 10  # new default applies
+    assert targets["web"]["degraded_ms"] == 500
+
+
+def test_a_result_for_a_target_removed_by_a_reload_is_ignored() -> None:
+    board = StatusBoard([WEB, DB], interval=30)
+    board.set_targets([WEB], interval=30)
+
+    board.record(at(0, ok=True, target="db"))  # a check that was still in flight
+
+    assert board.target_names() == ["web"]
+
+
+def test_set_targets_applies_a_changed_target_spec() -> None:
+    board = StatusBoard([WEB], interval=30)
+    faster = DnsTarget(name="web", host="web.test", interval=5)
+
+    board.set_targets([faster], interval=30)
+
+    assert by_name(board)["web"]["interval"] == 5
+
+
+def test_the_reason_for_a_failed_reload_is_part_of_the_status() -> None:
+    board = StatusBoard([WEB], interval=30)
+    assert board.snapshot()["config_error"] is None
+
+    board.set_config_error("ошибки в config.yaml")
+    assert board.snapshot()["config_error"] == "ошибки в config.yaml"
+
+    board.set_config_error(None)
+    assert board.snapshot()["config_error"] is None

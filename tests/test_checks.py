@@ -322,3 +322,19 @@ async def test_wrong_status_is_reported_before_the_body_is_considered(
 def test_head_requests_cannot_expect_body_text() -> None:
     with pytest.raises(ValueError, match="HEAD"):
         HttpTarget(name="x", url="https://example.test", method="HEAD", body_contains="ok")
+
+
+async def test_configure_changes_the_default_timeout_for_later_checks(
+    client_for: ClientFactory,
+) -> None:
+    async def slow(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(0.05)
+        return httpx.Response(200)
+
+    checker = Checker(client_for(slow), 5, WARN_DAYS)
+    assert (await checker.check(http_target())).ok
+
+    checker.configure(timeout=0.01, ssl_warn_days=WARN_DAYS)
+
+    result = await checker.check(http_target())
+    assert result.error == "timed out after 0.01s"

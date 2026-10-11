@@ -49,6 +49,11 @@ class Checker:
         self._timeout = timeout
         self._ssl_warn_days = ssl_warn_days
 
+    def configure(self, timeout: float, ssl_warn_days: int) -> None:
+        """Apply new global defaults, e.g. after the config was reloaded."""
+        self._timeout = timeout
+        self._ssl_warn_days = ssl_warn_days
+
     async def check(self, target: Target) -> CheckResult:
         timeout = target.timeout if target.timeout is not None else self._timeout
         try:

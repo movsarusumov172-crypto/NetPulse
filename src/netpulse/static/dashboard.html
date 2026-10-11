@@ -65,6 +65,9 @@
     .foot { color: var(--muted); font-size: 12px; display: flex; justify-content: space-between; gap: 8px; }
     .offline { color: var(--down); }
     h2 { font-size: 18px; }
+    .config-error { padding: 14px 18px; border-radius: 12px; background: rgba(245, 158, 11, .12); border: 1px solid rgba(245, 158, 11, .4); font-size: 14px; }
+    .config-error strong { display: block; margin-bottom: 6px; }
+    .config-error pre { margin: 0; white-space: pre-wrap; word-break: break-word; font: 13px/1.5 ui-monospace, Consolas, monospace; color: var(--muted); }
     .incidents { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 8px; }
     .incident { background: var(--surface); border: 1px solid var(--line); border-left: 4px solid var(--line); border-radius: 12px; padding: 12px 16px; display: grid; gap: 4px; }
     .incident.ongoing { border-left-color: var(--down); }
@@ -93,6 +96,7 @@
       </div>
     </header>
     <div id="banner" class="banner">Получаем статус…</div>
+    <div id="config-error" class="config-error" hidden></div>
     <div id="grid" class="grid"></div>
     <section>
       <h2>Последние инциденты</h2>
@@ -228,6 +232,16 @@
       return box;
     }
 
+    function showConfigError(message) {
+      const box = document.getElementById("config-error");
+      box.hidden = !message;
+      if (!message) return;
+      box.replaceChildren(
+        el("strong", null, "Не удалось применить изменения в config.yaml — работает прежняя конфигурация"),
+        el("pre", null, message),
+      );
+    }
+
     async function refresh() {
       try {
         const response = await fetch("/api/status", { cache: "no-store" });
@@ -255,6 +269,7 @@
         banner.textContent = text;
         document.getElementById("pulse").className = level === "bad" || level === "warn" ? `pulse ${level}` : "pulse";
         document.getElementById("grid").replaceChildren(...data.targets.map(card));
+        showConfigError(data.config_error);
         const updated = document.getElementById("updated");
         updated.className = "";
         updated.textContent = `Обновлено ${new Date().toLocaleTimeString("ru-RU")}`;

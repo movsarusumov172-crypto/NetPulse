@@ -69,7 +69,7 @@ def run(config: ConfigOption = Path("config.yaml")) -> None:
     # As PID 1 in a container, SIGTERM would otherwise be ignored. Exiting lets asyncio clean up.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     with contextlib.suppress(KeyboardInterrupt):
-        asyncio.run(run_monitor(settings))
+        asyncio.run(run_monitor(settings, config))
 
 
 @app.command()

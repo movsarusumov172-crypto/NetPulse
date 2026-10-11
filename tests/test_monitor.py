@@ -1,12 +1,13 @@
 import asyncio
 import contextlib
-from collections.abc import Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
 
-from netpulse.config import Settings
+from netpulse.config import Settings, load_settings
 from netpulse.dashboard import StatusBoard
 from netpulse.metrics import Metrics
 from netpulse.models import CheckResult, DnsTarget, Target
@@ -444,3 +445,244 @@ async def test_a_paused_target_leaves_no_stale_metrics_and_shows_as_paused(
     snapshot = snapshot_of(board)
     assert snapshot["state"] == "paused"
     assert snapshot["since"] == (T0 + timedelta(hours=1)).isoformat()
+
+
+# ---- reloading the configuration ---------------------------------------------------------------
+
+
+async def fast_sleep(delay: float) -> None:
+    await asyncio.sleep(0.001)
+
+
+class Recorder:
+    """A check function that records every call and answers with a fixed outcome."""
+
+    def __init__(self, ok: bool = True) -> None:
+        self.ok = ok
+        self.calls: list[Target] = []
+
+    async def __call__(self, target: Target) -> CheckResult:
+        self.calls.append(target)
+        return CheckResult(
+            target.name, ok=self.ok, latency_ms=1.0, error=None if self.ok else "boom"
+        )
+
+    def names(self) -> list[str]:
+        return [target.name for target in self.calls]
+
+
+async def eventually(condition: Callable[[], bool], timeout: float = 3.0) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not condition():
+        if asyncio.get_running_loop().time() > deadline:
+            raise AssertionError("condition not met in time")
+        await asyncio.sleep(0.005)
+
+
+@contextlib.asynccontextmanager
+async def running(monitor: Monitor) -> AsyncIterator[None]:
+    task = asyncio.create_task(monitor.run())
+    try:
+        yield
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+def reload_monitor(
+    storage: Storage,
+    settings: Settings,
+    check: CheckFn,
+    *,
+    notifier: FakeNotifier | None = None,
+    board: StatusBoard | None = None,
+    metrics: Metrics | None = None,
+    config_path: Path | None = None,
+    on_settings: Callable[[Settings], None] | None = None,
+) -> Monitor:
+    return Monitor(
+        settings,
+        check=check,
+        storage=storage,
+        metrics=metrics or Metrics(),
+        notifier=notifier,
+        board=board,
+        sleep=fast_sleep,
+        config_path=config_path,
+        on_settings=on_settings,
+    )
+
+
+def dns(name: str, **kwargs: Any) -> DnsTarget:
+    return DnsTarget(name=name, host=f"{name}.test", **kwargs)
+
+
+async def test_new_targets_start_being_checked_and_removed_ones_stop(storage: Storage) -> None:
+    check = Recorder()
+    board = StatusBoard([dns("a")], interval=30)
+    monitor = reload_monitor(storage, Settings(targets=[dns("a")]), check, board=board)
+
+    async with running(monitor):
+        await eventually(lambda: "a" in check.names())
+
+        monitor.apply_settings(Settings(targets=[dns("a"), dns("b")]))
+        await eventually(lambda: "b" in check.names())
+        assert board.target_names() == ["a", "b"]
+
+        monitor.apply_settings(Settings(targets=[dns("b")]))
+        assert board.target_names() == ["b"]
+        await asyncio.sleep(0.02)  # let a cancelled loop finish whatever it was doing
+        calls_to_a = check.names().count("a")
+        await asyncio.sleep(0.05)
+        assert check.names().count("a") == calls_to_a  # no more checks of the removed target
+
+
+async def test_removing_a_target_closes_its_incident_and_drops_its_metrics(
+    storage: Storage,
+) -> None:
+    metrics = Metrics()
+    check = Recorder(ok=False)
+    settings = Settings(targets=[dns("a"), dns("b")], retries=0)
+    monitor = reload_monitor(storage, settings, check, metrics=metrics)
+
+    async with running(monitor):
+        await eventually(lambda: {"a", "b"} <= set(check.names()))
+        assert [i.ended_at for i in storage.incidents(targets=["a"])] == [None]
+
+        monitor.apply_settings(Settings(targets=[dns("b")], retries=0))
+
+        assert storage.incidents(targets=["a"])[0].ended_at is not None
+        assert metrics.registry.get_sample_value("netpulse_up", {"target": "a"}) is None
+        assert storage.incidents(targets=["b"])[0].ended_at is None  # untouched
+
+
+async def test_untouched_targets_keep_their_loop_and_a_changed_one_gets_a_new_spec(
+    storage: Storage,
+) -> None:
+    check = Recorder()
+    monitor = reload_monitor(storage, Settings(targets=[dns("a"), dns("b")]), check)
+
+    async with running(monitor):
+        await eventually(lambda: {"a", "b"} <= set(check.names()))
+        loop_a, loop_b = monitor._tasks["a"], monitor._tasks["b"]
+
+        monitor.apply_settings(Settings(targets=[dns("a"), dns("b", interval=5)]))
+        await eventually(lambda: any(c.name == "b" and c.interval == 5 for c in check.calls))
+
+        assert monitor._tasks["a"] is loop_a
+        assert monitor._tasks["b"] is not loop_b
+        assert loop_b.cancelled() or loop_b.done()
+
+
+async def test_reload_does_not_repeat_an_alert_for_a_target_that_is_still_down(
+    storage: Storage,
+) -> None:
+    notifier = FakeNotifier()
+    check = Recorder(ok=False)
+    settings = Settings(targets=[dns("a")], retries=0)
+    monitor = reload_monitor(storage, settings, check, notifier=notifier)
+
+    async with running(monitor):
+        await eventually(lambda: len(notifier.messages) == 1)
+
+        monitor.apply_settings(Settings(targets=[dns("a", interval=10)], retries=0))
+        await eventually(lambda: any(c.interval == 10 for c in check.calls))
+        await asyncio.sleep(0.03)
+
+    assert len(notifier.messages) == 1
+
+
+async def test_settings_that_need_a_restart_are_kept_and_reported(
+    storage: Storage, caplog: pytest.LogCaptureFixture
+) -> None:
+    monitor = reload_monitor(storage, Settings(targets=[dns("a")], concurrency=4), Recorder())
+
+    monitor.apply_settings(Settings(targets=[dns("a")], concurrency=9, metrics_port=1234))
+
+    assert monitor._settings.concurrency == 4
+    assert monitor._settings.metrics_port == 9100
+    assert "`concurrency` needs a restart" in caplog.text
+    assert "`metrics_port` needs a restart" in caplog.text
+
+
+async def test_other_global_settings_take_effect_after_a_reload(storage: Storage) -> None:
+    seen: list[Settings] = []
+    monitor = reload_monitor(
+        storage, Settings(targets=[dns("a")]), Recorder(), on_settings=seen.append
+    )
+
+    monitor.apply_settings(Settings(targets=[dns("a")], retries=7, timeout=3, degraded_ms=250))
+
+    assert monitor._settings.retries == 7
+    assert monitor._settings.degraded_ms_for(dns("a")) == 250
+    assert seen[0].timeout == 3  # lets the checker pick up the new default timeout
+
+
+CONFIG_ONE = "targets:\n  - {name: a, type: dns, host: a.test}\n"
+CONFIG_TWO = (
+    "targets:\n  - {name: a, type: dns, host: a.test}\n  - {name: bb, type: dns, host: b.test}\n"
+)
+
+
+async def test_reload_if_changed_follows_edits_to_the_file(
+    storage: Storage, tmp_path: Path
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(CONFIG_ONE, encoding="utf-8")
+    settings = load_settings(path)
+    board = StatusBoard(list(settings.targets), settings.interval)
+    monitor = reload_monitor(storage, settings, Recorder(), board=board, config_path=path)
+
+    assert monitor.reload_if_changed() is False  # nothing edited yet
+
+    path.write_text(CONFIG_TWO, encoding="utf-8")
+    assert monitor.reload_if_changed() is True
+    assert board.target_names() == ["a", "bb"]
+    assert monitor.reload_if_changed() is False  # the same edit is not applied twice
+
+
+async def test_a_broken_edit_keeps_the_old_config_and_reports_why_until_it_is_fixed(
+    storage: Storage, tmp_path: Path
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(CONFIG_TWO, encoding="utf-8")
+    settings = load_settings(path)
+    board = StatusBoard(list(settings.targets), settings.interval)
+    monitor = reload_monitor(storage, settings, Recorder(), board=board, config_path=path)
+
+    path.write_text("interval: 0\ntargets: [{name: x, type: dns, host: h}]\n", encoding="utf-8")
+    assert monitor.reload_if_changed() is False
+
+    assert board.target_names() == ["a", "bb"]  # still the old targets
+    error = board.snapshot()["config_error"]
+    assert "строка 1" in error
+
+    path.write_text(CONFIG_ONE, encoding="utf-8")
+    assert monitor.reload_if_changed() is True
+    assert board.snapshot()["config_error"] is None
+    assert board.target_names() == ["a"]
+
+
+async def test_a_file_that_disappears_briefly_is_ignored(storage: Storage, tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(CONFIG_ONE, encoding="utf-8")
+    monitor = reload_monitor(storage, load_settings(path), Recorder(), board=None, config_path=path)
+
+    path.unlink()  # an editor replacing the file
+
+    assert monitor.reload_if_changed() is False
+
+
+async def test_the_watcher_applies_an_edit_to_a_running_monitor(
+    storage: Storage, tmp_path: Path
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(CONFIG_ONE, encoding="utf-8")
+    check = Recorder()
+    monitor = reload_monitor(storage, load_settings(path), check, config_path=path)
+
+    async with running(monitor):
+        await eventually(lambda: "a" in check.names())
+        path.write_text(CONFIG_TWO, encoding="utf-8")
+        await eventually(lambda: "bb" in check.names(), timeout=5)
