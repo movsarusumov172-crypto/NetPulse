@@ -134,6 +134,17 @@ class Uptime:
 
 
 @dataclass(frozen=True, slots=True)
+class LatencyBucket:
+    """Checks of one target within one time slot, summarised for the latency chart."""
+
+    start: datetime
+    checks: int
+    failures: int
+    avg_ms: float | None  # None when no check in the slot measured a latency
+    max_ms: float | None
+
+
+@dataclass(frozen=True, slots=True)
 class Incident:
     """A period during which a target was down. `ended_at` is None while it is ongoing."""
 

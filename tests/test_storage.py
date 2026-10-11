@@ -310,3 +310,53 @@ def test_pause_and_resume_are_idempotent_and_report_what_changed() -> None:
         assert storage.resume("web") is True
         assert storage.resume("web") is False
         assert storage.paused_names() == set()
+
+
+def _result(target: str, at: datetime, latency: float | None, ok: bool = True) -> CheckResult:
+    return CheckResult(target, ok=ok, latency_ms=latency, checked_at=at)
+
+
+def test_latency_series_averages_checks_into_slots_oldest_first() -> None:
+    base = datetime(2030, 1, 1, 12, 0, tzinfo=UTC)
+    with Storage(":memory:") as storage:
+        storage.save(_result("web", base + timedelta(seconds=10), 100.0))
+        storage.save(_result("web", base + timedelta(seconds=70), 300.0))
+        storage.save(_result("web", base + timedelta(minutes=5, seconds=1), 50.0))
+        storage.save(_result("web", base + timedelta(minutes=5, seconds=2), None, ok=False))
+
+        first, second = storage.latency_series("web", base - timedelta(hours=1), 300)
+
+    assert first.start == base
+    assert (first.checks, first.failures, first.avg_ms, first.max_ms) == (2, 0, 200.0, 300.0)
+    assert second.start == base + timedelta(minutes=5)
+    assert (second.checks, second.failures, second.avg_ms) == (2, 1, 50.0)  # failure has no latency
+
+
+def test_a_slot_where_everything_failed_has_no_latency() -> None:
+    base = datetime(2030, 1, 1, tzinfo=UTC)
+    with Storage(":memory:") as storage:
+        storage.save(_result("web", base, None, ok=False))
+        storage.save(_result("web", base + timedelta(seconds=30), None, ok=False))
+
+        [slot] = storage.latency_series("web", base - timedelta(hours=1))
+
+    assert (slot.checks, slot.failures, slot.avg_ms, slot.max_ms) == (2, 2, None, None)
+
+
+def test_latency_series_leaves_gaps_and_ignores_other_targets_and_older_checks() -> None:
+    base = datetime(2030, 1, 1, 12, tzinfo=UTC)
+    with Storage(":memory:") as storage:
+        storage.save(_result("web", base - timedelta(hours=30), 1.0))  # before the window
+        storage.save(_result("web", base, 10.0))
+        storage.save(_result("web", base + timedelta(hours=3), 20.0))  # the monitor was off between
+        storage.save(_result("db", base, 99.0))
+
+        slots = storage.latency_series("web", base - timedelta(hours=24))
+
+    assert [slot.avg_ms for slot in slots] == [10.0, 20.0]
+    assert slots[1].start - slots[0].start == timedelta(hours=3)
+
+
+def test_latency_series_of_a_quiet_target_is_empty() -> None:
+    with Storage(":memory:") as storage:
+        assert storage.latency_series("nothing", datetime(2030, 1, 1, tzinfo=UTC)) == []

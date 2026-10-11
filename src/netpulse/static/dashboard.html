@@ -76,6 +76,36 @@
     .incident .length { font-weight: 600; font-size: 14px; }
     .incident .length.ongoing { color: var(--down); }
     .badge { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; margin-right: 6px; }
+    .card { cursor: pointer; }
+    .card:focus-visible, .close:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+    body:has(dialog[open]) { overflow: hidden; }
+    dialog { border: 1px solid var(--line); border-radius: 16px; background: var(--surface); color: var(--ink); padding: 0; width: min(760px, calc(100% - 24px)); max-height: 90vh; }
+    dialog::backdrop { background: rgba(2, 6, 17, .72); }
+    .sheet { padding: 20px; display: grid; gap: 20px; }
+    .sheet-head { display: flex; justify-content: space-between; gap: 12px; align-items: start; }
+    .sheet-head h2 { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .close { flex: none; background: none; border: 1px solid var(--line); color: var(--ink); width: 40px; height: 40px; border-radius: 10px; font-size: 22px; line-height: 1; cursor: pointer; }
+    .sheet h3 { margin: 0 0 10px; font-size: 15px; }
+    .chart svg { display: block; width: 100%; height: auto; }
+    .chart-grid { stroke: var(--line); stroke-width: 1; }
+    .chart-axis { fill: var(--muted); font-size: 11px; }
+    .chart-line { fill: none; stroke: var(--up); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+    .chart-area { fill: var(--up); opacity: .12; }
+    .chart-dot { fill: var(--up); }
+    .chart-fail { fill: var(--down); opacity: .28; }
+    .chart-fail.all { opacity: .5; }
+    .chart-threshold { stroke: var(--warn); stroke-width: 1.5; stroke-dasharray: 5 4; }
+    .chart-threshold-label { fill: var(--warn); font-size: 11px; }
+    .chart-hit { fill: transparent; }
+    .legend { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 8px; color: var(--muted); font-size: 12px; }
+    .legend span::before { content: ""; display: inline-block; width: 14px; height: 3px; margin-right: 6px; vertical-align: middle; background: var(--up); border-radius: 2px; }
+    .legend .fail::before { height: 10px; width: 8px; background: var(--down); opacity: .6; }
+    .legend .limit::before { background: var(--warn); }
+    .sheet .incidents { margin-top: 0; }
+    @media (max-width: 520px) {
+      dialog { width: 100%; max-width: 100%; margin: auto 0 0; border-radius: 16px 16px 0 0; max-height: 92vh; }
+      .sheet { padding: 14px; }
+    }
     @media (max-width: 520px) {
       .wrap { padding: 16px 12px; gap: 16px; }
       .stats { grid-template-columns: repeat(2, 1fr); }
@@ -103,6 +133,28 @@
       <ul id="incidents" class="incidents"></ul>
     </section>
   </div>
+
+  <dialog id="detail" aria-labelledby="detail-title">
+    <div class="sheet">
+      <div class="sheet-head">
+        <div>
+          <h2 id="detail-title"></h2>
+          <div id="detail-address" class="address"></div>
+        </div>
+        <button id="detail-close" class="close" type="button" aria-label="Закрыть">×</button>
+      </div>
+      <div id="detail-stats" class="stats"></div>
+      <section>
+        <h3>Задержка за 24 часа</h3>
+        <div id="chart" class="chart"></div>
+        <div id="legend" class="legend"></div>
+      </section>
+      <section>
+        <h3>Инциденты</h3>
+        <ul id="detail-incidents" class="incidents"></ul>
+      </section>
+    </div>
+  </dialog>
 
   <script>
     "use strict";
@@ -141,11 +193,11 @@
       });
     }
 
-    function incident(item) {
+    function incident(item, showTarget = true) {
       const box = el("li", item.ongoing ? "incident ongoing" : "incident");
       const top = el("div", "row");
       top.append(
-        el("strong", null, item.target),
+        showTarget ? el("strong", null, item.target) : el("span"),
         el("span", item.ongoing ? "length ongoing" : "length",
           item.ongoing ? `идёт ${duration(item.duration_seconds)}` : `длился ${duration(item.duration_seconds)}`),
       );
@@ -198,6 +250,16 @@
 
     function card(target) {
       const box = el("article", `card ${target.state}`);
+      box.tabIndex = 0;
+      box.setAttribute("role", "button");
+      box.dataset.name = target.name;
+      box.addEventListener("click", () => openDetail(target.name));
+      box.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          openDetail(target.name);
+        }
+      });
       const top = el("div", "top");
       const title = el("div");
       const name = el("div", "name");
@@ -242,10 +304,231 @@
       );
     }
 
+
+    // --- detail panel ----------------------------------------------------------------------
+
+    const SVG_NS = "http://www.w3.org/2000/svg";
+    const HOUR = 3600 * 1000;
+    let openName = null;
+    let lastTargets = new Map();
+    let lastHistory = null;
+
+    class HttpError extends Error {
+      constructor(status) {
+        super(String(status));
+        this.status = status;
+      }
+    }
+
+    async function getJson(url) {
+      const response = await fetch(url, { cache: "no-store" });
+      if (!response.ok) throw new HttpError(response.status);
+      return response.json();
+    }
+
+    function errorText(error) {
+      if (error instanceof HttpError) {
+        if (error.status === 404) return "Эта цель больше не отслеживается";
+        if (error.status >= 500) return "Монитор вернул ошибку, попробуйте позже";
+        return "Не удалось запросить данные";
+      }
+      return "Монитор недоступен";
+    }
+
+    function svg(tag, attributes, text) {
+      const node = document.createElementNS(SVG_NS, tag);
+      for (const [name, value] of Object.entries(attributes || {})) node.setAttribute(name, String(value));
+      if (text !== undefined) node.textContent = text;
+      return node;
+    }
+
+    // Smallest "round" maximum (1, 2, 4, 8 or 10 times a power of ten) that fits the value,
+    // so the four grid steps are round numbers too.
+    function niceMax(value) {
+      const power = Math.pow(10, Math.floor(Math.log10(Math.max(value, 1e-9))));
+      for (const factor of [1, 2, 4, 8, 10]) if (factor * power >= value) return factor * power;
+      return 10 * power;
+    }
+
+    function formatMs(value) {
+      return `${value < 10 ? value.toFixed(1) : Math.round(value)} мс`;
+    }
+
+    function clockTime(ms) {
+      return new Date(ms).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+    }
+
+    function renderChart(container, legend, data) {
+      container.replaceChildren();
+      legend.replaceChildren();
+      if (!data.points.length) {
+        container.append(el("p", "empty", "За последние 24 часа данных нет"));
+        return;
+      }
+      const width = Math.max(280, container.clientWidth);
+      const height = 220;
+      const margin = { left: 50, right: 10, top: 10, bottom: 26 };
+      const plotWidth = width - margin.left - margin.right;
+      const plotHeight = height - margin.top - margin.bottom;
+      const since = Date.parse(data.since);
+      const until = Date.parse(data.until);
+      const slot = data.bucket_seconds * 1000;
+      const x = (ms) => margin.left + ((ms - since) / (until - since)) * plotWidth;
+
+      const peak = Math.max(1, ...data.points.map((p) => p.avg_ms ?? 0));
+      let top = peak * 1.1;
+      const limit = data.degraded_ms;
+      // A threshold far above everything measured would flatten the line: leave it out then.
+      const showLimit = limit != null && limit <= peak * 3;
+      if (showLimit) top = Math.max(top, limit * 1.05);
+      const yMax = niceMax(top);
+      const y = (value) => margin.top + plotHeight - (value / yMax) * plotHeight;
+
+      const failures = data.points.reduce((sum, p) => sum + p.failures, 0);
+      const checks = data.points.reduce((sum, p) => sum + p.checks, 0);
+      const chart = svg("svg", { viewBox: `0 0 ${width} ${height}`, role: "img",
+        "aria-label": `График задержки за 24 часа: проверок ${checks}, сбоев ${failures}` });
+
+      for (let step = 0; step <= 4; step += 1) {
+        const value = (yMax / 4) * step;
+        chart.append(
+          svg("line", { class: "chart-grid", x1: margin.left, x2: width - margin.right, y1: y(value), y2: y(value) }),
+          svg("text", { class: "chart-axis", x: margin.left - 6, y: y(value) + 4, "text-anchor": "end" },
+            value < 10 && value > 0 ? value.toFixed(1) : String(Math.round(value))),
+        );
+      }
+      for (let back = 0; back <= 4; back += 1) {
+        const at = until - back * 6 * HOUR;
+        const px = x(at);
+        const anchor = back === 4 ? "start" : back === 0 ? "end" : "middle";
+        chart.append(svg("text", { class: "chart-axis", x: px, y: height - 8, "text-anchor": anchor }, clockTime(at)));
+      }
+
+      const slotWidth = Math.max(3, (slot / (until - since)) * plotWidth);
+      for (const point of data.points) {
+        if (point.failures === 0) continue;
+        const all = point.failures === point.checks;
+        chart.append(svg("rect", { class: all ? "chart-fail all" : "chart-fail",
+          x: x(Date.parse(point.t)), y: margin.top, width: slotWidth, height: plotHeight }));
+      }
+
+      if (showLimit) {
+        chart.append(
+          svg("line", { class: "chart-threshold", x1: margin.left, x2: width - margin.right, y1: y(limit), y2: y(limit) }),
+          svg("text", { class: "chart-threshold-label", x: width - margin.right - 2, y: y(limit) - 4, "text-anchor": "end" },
+            `порог ${formatMs(limit)}`),
+        );
+      }
+
+      // One line per run of consecutive slots; a missing slot (monitor off, pause) breaks it.
+      const runs = [];
+      let previous = null;
+      for (const point of data.points) {
+        const at = Date.parse(point.t);
+        if (point.avg_ms == null) { previous = null; continue; }
+        if (previous === null || at - previous > slot * 1.5) runs.push([]);
+        runs[runs.length - 1].push([x(at + slot / 2), y(point.avg_ms)]);
+        previous = at;
+      }
+      for (const run of runs) {
+        if (run.length === 1) {
+          chart.append(svg("circle", { class: "chart-dot", cx: run[0][0], cy: run[0][1], r: 2.5 }));
+          continue;
+        }
+        const line = run.map(([px, py], i) => `${i ? "L" : "M"}${px.toFixed(1)} ${py.toFixed(1)}`).join(" ");
+        const floor = y(0).toFixed(1);
+        chart.append(
+          svg("path", { class: "chart-area", d: `${line} L${run[run.length - 1][0].toFixed(1)} ${floor} L${run[0][0].toFixed(1)} ${floor} Z` }),
+          svg("path", { class: "chart-line", d: line }),
+        );
+      }
+
+      for (const point of data.points) {
+        const parts = [clockTime(Date.parse(point.t))];
+        if (point.avg_ms != null) parts.push(`${formatMs(point.avg_ms)} (макс. ${formatMs(point.max_ms)})`);
+        if (point.failures) parts.push(`сбоев: ${point.failures} из ${point.checks}`);
+        const hit = svg("rect", { class: "chart-hit", x: x(Date.parse(point.t)), y: margin.top, width: slotWidth, height: plotHeight });
+        hit.append(svg("title", {}, parts.join(" · ")));
+        chart.append(hit);
+      }
+      container.append(chart);
+
+      legend.append(el("span", null, `средняя задержка за ${Math.round(data.bucket_seconds / 60)} мин`));
+      if (failures) legend.append(el("span", "fail", "были сбои"));
+      if (showLimit) legend.append(el("span", "limit", "порог деградации"));
+    }
+
+    function renderDetailHeader() {
+      const target = lastTargets.get(openName);
+      const title = document.getElementById("detail-title");
+      const stats = document.getElementById("detail-stats");
+      if (!target) {
+        title.textContent = openName;
+        document.getElementById("detail-address").textContent = "";
+        stats.replaceChildren();
+        return;
+      }
+      title.replaceChildren(target.name, el("span", `state ${target.state}`, STATE_TEXT[target.state]));
+      document.getElementById("detail-address").textContent = `${target.type} · ${target.address}`;
+      const sslWarn = target.ssl_days_left != null && target.ssl_days_left < 14 ? "warn" : null;
+      stats.replaceChildren(
+        stat("Задержка", target.latency_ms == null ? "—" : `${Math.round(target.latency_ms)} мс`),
+        stat("Аптайм 24 ч", percent(target.uptime_24h)),
+        stat("Аптайм 7 д", percent(target.uptime_7d)),
+        stat("SSL истекает", target.ssl_days_left == null ? "—" : `${target.ssl_days_left} дн.`, sslWarn),
+      );
+    }
+
+    async function loadDetail() {
+      const name = openName;
+      if (!name) return;
+      const chartBox = document.getElementById("chart");
+      const legend = document.getElementById("legend");
+      const list = document.getElementById("detail-incidents");
+      const query = encodeURIComponent(name);
+      try {
+        const [history, incidents] = await Promise.all([
+          getJson(`/api/history?target=${query}`),
+          getJson(`/api/incidents?target=${query}&limit=10`),
+        ]);
+        if (name !== openName) return; // another target was opened while this one loaded
+        lastHistory = history;
+        renderChart(chartBox, legend, history);
+        list.replaceChildren(...(incidents.incidents.length
+          ? incidents.incidents.map((item) => incident(item, false))
+          : [el("li", "empty", "Инцидентов не было")]));
+      } catch (error) {
+        if (name !== openName) return;
+        lastHistory = null;
+        legend.replaceChildren();
+        chartBox.replaceChildren(el("p", "empty", errorText(error)));
+        list.replaceChildren();
+      }
+    }
+
+    function openDetail(name) {
+      openName = name;
+      lastHistory = null;
+      document.getElementById("chart").replaceChildren(el("p", "empty", "Загрузка…"));
+      document.getElementById("legend").replaceChildren();
+      document.getElementById("detail-incidents").replaceChildren();
+      renderDetailHeader();
+      document.getElementById("detail").showModal();
+      loadDetail();
+    }
+
+    const detail = document.getElementById("detail");
+    document.getElementById("detail-close").addEventListener("click", () => detail.close());
+    detail.addEventListener("click", (event) => { if (event.target === detail) detail.close(); });
+    detail.addEventListener("close", () => { openName = null; lastHistory = null; });
+    window.addEventListener("resize", () => {
+      if (openName && lastHistory) renderChart(document.getElementById("chart"), document.getElementById("legend"), lastHistory);
+    });
+
     async function refresh() {
       try {
-        const response = await fetch("/api/status", { cache: "no-store" });
-        const data = await response.json();
+        const data = await getJson("/api/status");
+        lastTargets = new Map(data.targets.map((t) => [t.name, t]));
         // Targets in maintenance are neither working nor failing: keep them out of the totals.
         const paused = data.targets.filter((t) => t.state === "paused");
         const active = data.targets.filter((t) => t.state !== "paused");
@@ -257,9 +540,9 @@
         banner.className = level ? `banner ${level}` : "banner";
         let text;
         if (down.length) {
-          text = `Проблемы: ${down.map((t) => t.name).join(", ")}. Работают ${working} из ${active.length}.`;
+          text = `Проблемы: ${down.map((t) => t.name).join(", ")}. Работают ${working} из ${active.length}`;
         } else if (slow.length) {
-          text = `Деградация: ${slow.map((t) => t.name).join(", ")}. Все сервисы отвечают.`;
+          text = `Деградация: ${slow.map((t) => t.name).join(", ")}. Все сервисы отвечают`;
         } else if (!active.length) {
           text = "Все цели на обслуживании";
         } else {
@@ -268,8 +551,12 @@
         if (paused.length && active.length) text += ` · на обслуживании: ${paused.length}`;
         banner.textContent = text;
         document.getElementById("pulse").className = level === "bad" || level === "warn" ? `pulse ${level}` : "pulse";
+        // Rebuilding the cards drops keyboard focus: put it back on the same card.
+        const focused = document.activeElement?.dataset?.name;
         document.getElementById("grid").replaceChildren(...data.targets.map(card));
+        if (focused) document.querySelector(`.card[data-name="${CSS.escape(focused)}"]`)?.focus();
         showConfigError(data.config_error);
+        if (openName) renderDetailHeader();
         const updated = document.getElementById("updated");
         updated.className = "";
         updated.textContent = `Обновлено ${new Date().toLocaleTimeString("ru-RU")}`;
@@ -284,6 +571,7 @@
     refreshIncidents();
     setInterval(refresh, 5000);
     setInterval(refreshIncidents, 15000);
+    setInterval(loadDetail, 15000);
   </script>
 </body>
 </html>

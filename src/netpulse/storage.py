@@ -3,12 +3,12 @@
 import sqlite3
 from collections.abc import Callable, Collection
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import TracebackType
 from typing import Self
 
-from netpulse.models import CheckResult, Incident, Uptime
+from netpulse.models import CheckResult, Incident, LatencyBucket, Uptime
 
 
 class StorageError(Exception):
@@ -203,6 +203,39 @@ class Storage:
         day = self.uptime_ratios(now - timedelta(hours=24))
         week = self.uptime_ratios(now - timedelta(days=7))
         return {target: Uptime(day.get(target), ratio) for target, ratio in week.items()}
+
+    def latency_series(
+        self, target: str, since: datetime, bucket_seconds: int = 300
+    ) -> list[LatencyBucket]:
+        """Latency of one target since `since`, averaged into fixed slots (oldest first).
+
+        Slots without any check are omitted, so gaps (monitor off, target paused) stay visible.
+        """
+        slots: dict[int, list[float]] = {}  # slot start -> [checks, failures, sum, n, max]
+        rows = self._conn.execute(
+            "SELECT checked_at, ok, latency_ms FROM results"
+            " WHERE target = ? AND checked_at >= ? ORDER BY checked_at",
+            (target, since.isoformat()),
+        )
+        for row in rows:
+            moment = int(datetime.fromisoformat(row["checked_at"]).timestamp())
+            slot = slots.setdefault(moment - moment % bucket_seconds, [0, 0, 0.0, 0, 0.0])
+            slot[0] += 1
+            slot[1] += 0 if row["ok"] else 1
+            if row["latency_ms"] is not None:
+                slot[2] += row["latency_ms"]
+                slot[3] += 1
+                slot[4] = max(slot[4], row["latency_ms"])
+        return [
+            LatencyBucket(
+                start=datetime.fromtimestamp(start, UTC),
+                checks=int(checks),
+                failures=int(failures),
+                avg_ms=total / measured if measured else None,
+                max_ms=peak if measured else None,
+            )
+            for start, (checks, failures, total, measured, peak) in sorted(slots.items())
+        ]
 
     def open_incident(self, target: str, started_at: datetime, error: str | None) -> None:
         """Start an incident unless the target already has an open one."""

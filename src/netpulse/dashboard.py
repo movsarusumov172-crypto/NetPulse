@@ -6,7 +6,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
@@ -16,7 +16,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, generate_latest
 
-from netpulse.models import CheckResult, Incident, Target, Uptime
+from netpulse.models import CheckResult, Incident, LatencyBucket, Target, Uptime
 from netpulse.storage import Storage
 
 logger = logging.getLogger(__name__)
@@ -25,6 +25,8 @@ HISTORY_SIZE = 30
 INCIDENTS_DEFAULT_LIMIT = 20
 INCIDENTS_MAX_LIMIT = 100
 UPTIME_CACHE_SECONDS = 30.0
+HISTORY_HOURS = 24
+HISTORY_BUCKET_SECONDS = 300
 
 
 @dataclass
@@ -96,6 +98,14 @@ class StatusBoard:
                 status.since = at or datetime.now(UTC)
             else:
                 status.since = status.last.checked_at if status.last else None
+
+    def degraded_ms(self, name: str) -> float | None:
+        """The latency threshold that applies to the target (its own or the global one)."""
+        with self._lock:
+            status = self._statuses.get(name)
+            if status is None or status.target.degraded_ms is None:
+                return self._degraded_ms
+            return status.target.degraded_ms
 
     def target_names(self) -> list[str]:
         with self._lock:
@@ -242,6 +252,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(self._status(server))
         elif path == "/api/incidents":
             self._incidents(server, query)
+        elif path == "/api/history":
+            self._history(server, query)
         elif path == "/":
             self._send(server.page, "text/html; charset=utf-8")
         else:
@@ -272,6 +284,39 @@ class _Handler(BaseHTTPRequestHandler):
                 incidents = storage.incidents(limit=limit, targets=names)
         now = datetime.now(UTC)
         self._send_json({"incidents": [_incident_json(item, now) for item in incidents]})
+
+    def _history(self, server: _Server, query: dict[str, list[str]]) -> None:
+        target = query.get("target", [None])[0]
+        if target is None:
+            raise _BadRequest("target is required")
+        if target not in server.board.target_names():
+            self._send_json({"error": "unknown target"}, HTTPStatus.NOT_FOUND)
+            return
+        until = datetime.now(UTC)
+        since = until - timedelta(hours=HISTORY_HOURS)
+        buckets: list[LatencyBucket] = []
+        if server.db_path is not None:
+            with Storage(server.db_path, readonly=True) as storage:
+                buckets = storage.latency_series(target, since, HISTORY_BUCKET_SECONDS)
+        self._send_json(
+            {
+                "target": target,
+                "since": since.isoformat(),
+                "until": until.isoformat(),
+                "bucket_seconds": HISTORY_BUCKET_SECONDS,
+                "degraded_ms": server.board.degraded_ms(target),
+                "points": [
+                    {
+                        "t": bucket.start.isoformat(),
+                        "avg_ms": bucket.avg_ms,
+                        "max_ms": bucket.max_ms,
+                        "checks": bucket.checks,
+                        "failures": bucket.failures,
+                    }
+                    for bucket in buckets
+                ],
+            }
+        )
 
     def _send_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode()

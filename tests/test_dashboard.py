@@ -325,3 +325,78 @@ def test_the_reason_for_a_failed_reload_is_part_of_the_status() -> None:
 
     board.set_config_error(None)
     assert board.snapshot()["config_error"] is None
+
+
+@pytest.fixture
+def history_server(tmp_path: Path) -> Iterator[str]:
+    now = datetime.now(UTC)
+    board = StatusBoard(
+        [WEB, DnsTarget(name="db", host="db.test", degraded_ms=900)], 30, degraded_ms=400
+    )
+    with Storage(tmp_path / "np.db") as storage:
+        storage.save(
+            CheckResult("web", ok=True, latency_ms=120.0, checked_at=now - timedelta(hours=2))
+        )
+        storage.save(
+            CheckResult("web", ok=False, error="boom", checked_at=now - timedelta(hours=1))
+        )
+        storage.save(
+            CheckResult("web", ok=True, latency_ms=80.0, checked_at=now - timedelta(hours=30))
+        )
+        server = StatusServer(Metrics().registry, board, tmp_path / "np.db")
+        port = server.start("127.0.0.1", 0)
+        try:
+            yield f"http://127.0.0.1:{port}"
+        finally:
+            server.stop()
+
+
+def test_history_endpoint_returns_the_last_24_hours_in_slots(history_server: str) -> None:
+    data = get_json(f"{history_server}/api/history?target=web")
+
+    assert data["target"] == "web"
+    assert data["bucket_seconds"] == 300
+    window = datetime.fromisoformat(data["until"]) - datetime.fromisoformat(data["since"])
+    assert window == timedelta(hours=24)
+    assert [(p["avg_ms"], p["failures"], p["checks"]) for p in data["points"]] == [
+        (120.0, 0, 1),
+        (None, 1, 1),
+    ]  # the check from 30 hours ago is outside the window
+
+
+def test_history_reports_the_threshold_that_applies_to_the_target(history_server: str) -> None:
+    assert get_json(f"{history_server}/api/history?target=web")["degraded_ms"] == 400
+    assert get_json(f"{history_server}/api/history?target=db")["degraded_ms"] == 900
+    assert get_json(f"{history_server}/api/history?target=db")["points"] == []
+
+
+def test_history_endpoint_validates_its_parameters(history_server: str) -> None:
+    assert error_of(f"{history_server}/api/history") == (400, "target is required")
+    assert error_of(f"{history_server}/api/history?target=nope") == (404, "unknown target")
+
+
+def test_history_without_a_database_is_empty(server: tuple[str, Metrics]) -> None:
+    base, _ = server
+
+    assert get_json(f"{base}/api/history?target=web")["points"] == []
+
+
+PAGE = Path(__file__).parent.parent / "src" / "netpulse" / "static" / "dashboard.html"
+
+
+def test_page_renders_user_data_only_through_text_nodes() -> None:
+    """Target names, addresses and error messages come from config and the network."""
+    source = PAGE.read_text(encoding="utf-8")
+
+    for forbidden in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write"):
+        assert forbidden not in source
+
+
+def test_page_has_the_incident_block_and_the_detail_panel() -> None:
+    source = PAGE.read_text(encoding="utf-8")
+
+    assert "Последние инциденты" in source
+    assert '<dialog id="detail"' in source
+    assert "/api/history" in source
+    assert "/api/incidents" in source
+    assert 'name="viewport"' in source  # usable on a phone
