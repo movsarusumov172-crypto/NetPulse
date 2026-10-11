@@ -41,6 +41,7 @@ class _TargetBase(BaseModel):
     timeout: float | None = Field(default=None, gt=0)
     retries: int | None = Field(default=None, ge=0)
     degraded_ms: float | None = Field(default=None, gt=0)
+    paused: bool = False  # maintenance: no checks, no alerts
 
 
 class HttpTarget(_TargetBase):

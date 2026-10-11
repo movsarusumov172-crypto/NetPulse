@@ -33,12 +33,15 @@
     .meta a { color: var(--muted); }
     .banner { padding: 18px 22px; border-radius: 14px; font-size: 18px; font-weight: 600; background: rgba(34, 197, 94, .12); border: 1px solid rgba(34, 197, 94, .35); }
     .banner.bad { background: rgba(239, 68, 68, .12); border-color: rgba(239, 68, 68, .4); }
+    .banner.idle { background: rgba(100, 116, 139, .12); border-color: rgba(100, 116, 139, .35); }
     .banner.warn { background: rgba(245, 158, 11, .12); border-color: rgba(245, 158, 11, .4); }
     .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(340px, 100%), 1fr)); gap: 16px; }
     .card { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 18px; display: grid; gap: 12px; border-left: 4px solid var(--pending); }
     .card.up { border-left-color: var(--up); }
     .card.down { border-left-color: var(--down); }
     .card.degraded { border-left-color: var(--warn); }
+    .card.paused { border-left-color: var(--pending); }
+    .card.paused .stats, .card.paused .bars { opacity: .45; }
     .top { display: flex; justify-content: space-between; gap: 12px; align-items: start; }
     .name { font-weight: 600; font-size: 16px; }
     .address { color: var(--muted); font-size: 13px; word-break: break-all; }
@@ -46,6 +49,7 @@
     .state.up { background: rgba(34, 197, 94, .15); color: var(--up); }
     .state.down { background: rgba(239, 68, 68, .15); color: var(--down); }
     .state.degraded { background: rgba(245, 158, 11, .15); color: var(--warn); }
+    .state.paused { background: rgba(100, 116, 139, .2); color: var(--muted); }
     .state.pending { background: rgba(100, 116, 139, .2); color: var(--muted); }
     .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
     .stat small { display: block; color: var(--muted); font-size: 12px; }
@@ -57,6 +61,7 @@
     .bar.empty { background: var(--line); height: 20% !important; }
     .error { font-size: 13px; color: #fca5a5; background: rgba(239, 68, 68, .08); border-radius: 8px; padding: 8px 10px; word-break: break-word; }
     .note { font-size: 13px; color: var(--warn); background: rgba(245, 158, 11, .08); border-radius: 8px; padding: 8px 10px; }
+    .note.idle { color: var(--muted); background: rgba(100, 116, 139, .1); }
     .foot { color: var(--muted); font-size: 12px; display: flex; justify-content: space-between; gap: 8px; }
     .offline { color: var(--down); }
     h2 { font-size: 18px; }
@@ -100,6 +105,7 @@
 
     const STATE_TEXT = {
       up: "Работает", degraded: "Деградация", down: "Не отвечает", pending: "Ждём первую проверку",
+      paused: "На обслуживании",
     };
     const HISTORY_SIZE = 30;
 
@@ -208,11 +214,14 @@
 
       box.append(top, stats, bars(target.history));
       if (target.state === "down" && target.error) box.append(el("div", "error", target.error));
+      if (target.state === "paused") {
+        box.append(el("div", "note idle", "Проверки и уведомления приостановлены"));
+      }
       if (target.state === "degraded" && target.degraded_ms != null) {
         box.append(el("div", "note", `Отвечает медленнее порога ${Math.round(target.degraded_ms)} мс`));
       }
       const foot = el("div", "foot");
-      const SINCE = { up: "Работает", degraded: "Медленно", down: "Лежит" };
+      const SINCE = { up: "Работает", degraded: "Медленно", down: "Лежит", paused: "На паузе" };
       const since = target.state === "pending" ? "" : `${SINCE[target.state]} уже ${ago(target.since)}`;
       foot.append(el("span", null, since), el("span", null, `проверка каждые ${target.interval} с`));
       box.append(foot);
@@ -223,20 +232,28 @@
       try {
         const response = await fetch("/api/status", { cache: "no-store" });
         const data = await response.json();
-        const down = data.targets.filter((t) => t.state === "down");
-        const slow = data.targets.filter((t) => t.state === "degraded");
-        const working = data.targets.length - down.length;
+        // Targets in maintenance are neither working nor failing: keep them out of the totals.
+        const paused = data.targets.filter((t) => t.state === "paused");
+        const active = data.targets.filter((t) => t.state !== "paused");
+        const down = active.filter((t) => t.state === "down");
+        const slow = active.filter((t) => t.state === "degraded");
+        const working = active.length - down.length;
         const banner = document.getElementById("banner");
-        const level = down.length ? "bad" : slow.length ? "warn" : "";
+        const level = down.length ? "bad" : slow.length ? "warn" : !active.length ? "idle" : "";
         banner.className = level ? `banner ${level}` : "banner";
+        let text;
         if (down.length) {
-          banner.textContent = `Проблемы: ${down.map((t) => t.name).join(", ")}. Работают ${working} из ${data.targets.length}.`;
+          text = `Проблемы: ${down.map((t) => t.name).join(", ")}. Работают ${working} из ${active.length}.`;
         } else if (slow.length) {
-          banner.textContent = `Деградация: ${slow.map((t) => t.name).join(", ")}. Все сервисы отвечают.`;
+          text = `Деградация: ${slow.map((t) => t.name).join(", ")}. Все сервисы отвечают.`;
+        } else if (!active.length) {
+          text = "Все цели на обслуживании";
         } else {
-          banner.textContent = `Все сервисы работают (${working} из ${data.targets.length})`;
+          text = `Все сервисы работают (${working} из ${active.length})`;
         }
-        document.getElementById("pulse").className = level ? `pulse ${level}` : "pulse";
+        if (paused.length && active.length) text += ` · на обслуживании: ${paused.length}`;
+        banner.textContent = text;
+        document.getElementById("pulse").className = level === "bad" || level === "warn" ? `pulse ${level}` : "pulse";
         document.getElementById("grid").replaceChildren(...data.targets.map(card));
         const updated = document.getElementById("updated");
         updated.className = "";

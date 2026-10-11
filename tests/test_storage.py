@@ -299,3 +299,14 @@ def test_degraded_checks_count_as_uptime() -> None:
             storage.save(CheckResult("web", ok=True, degraded=degraded, checked_at=now))
 
         assert storage.uptime(now)["web"].day == 1.0
+
+
+def test_pause_and_resume_are_idempotent_and_report_what_changed() -> None:
+    with Storage(":memory:") as storage:
+        assert storage.pause("web", T0) is True
+        assert storage.pause("web", T0) is False
+        assert storage.paused_names() == {"web"}
+
+        assert storage.resume("web") is True
+        assert storage.resume("web") is False
+        assert storage.paused_names() == set()

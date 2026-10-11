@@ -104,3 +104,65 @@ def test_a_broken_config_is_explained_in_plain_text_with_exit_code_2(tmp_path: P
     assert "Ошибка" in result.output
     assert "строка 1" in result.output
     assert "Traceback" not in result.output
+
+
+def _config_with(tmp_path: Path, targets: str) -> Path:
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        f"database: '{(tmp_path / 'np.db').as_posix()}'\ntargets: {targets}\n", encoding="utf-8"
+    )
+    return config
+
+
+def _status_line(output: str, name: str) -> str:
+    return next(line for line in output.splitlines() if line.startswith(name))
+
+
+def test_pause_then_status_then_resume(tmp_path: Path) -> None:
+    config = _config_with(tmp_path, "[{name: web, type: dns, host: a.test}]")
+    args = ["--config", str(config)]
+
+    paused = runner.invoke(cli.app, ["pause", "web", *args])
+    again = runner.invoke(cli.app, ["pause", "web", *args])
+    during = runner.invoke(cli.app, ["status", *args])
+    resumed = runner.invoke(cli.app, ["resume", "web", *args])
+    after = runner.invoke(cli.app, ["status", *args])
+
+    assert paused.exit_code == 0
+    assert "поставлена на обслуживание" in paused.output
+    assert "уже на обслуживании" in again.output
+    assert "PAUSED" in _status_line(during.output, "web")
+    assert resumed.exit_code == 0
+    assert "снова проверяется" in resumed.output
+    assert "PENDING" in _status_line(after.output, "web")
+
+
+def test_resuming_a_target_that_was_not_paused_says_so(tmp_path: Path) -> None:
+    config = _config_with(tmp_path, "[{name: web, type: dns, host: a.test}]")
+
+    result = runner.invoke(cli.app, ["resume", "web", "--config", str(config)])
+
+    assert result.exit_code == 0
+    assert "не была на обслуживании" in result.output
+
+
+def test_a_target_paused_in_the_config_cannot_be_resumed_from_the_cli(tmp_path: Path) -> None:
+    config = _config_with(tmp_path, "[{name: web, type: dns, host: a.test, paused: true}]")
+    Storage(tmp_path / "np.db").close()  # the monitor has run once, so the database exists
+
+    status = runner.invoke(cli.app, ["status", "--config", str(config)])
+    resume = runner.invoke(cli.app, ["resume", "web", "--config", str(config)])
+
+    assert "PAUSED" in _status_line(status.output, "web")
+    assert resume.exit_code == 1
+    assert "paused: true" in resume.output
+
+
+def test_unknown_target_name_suggests_the_closest_one(tmp_path: Path) -> None:
+    config = _config_with(tmp_path, "[{name: website, type: dns, host: a.test}]")
+
+    result = runner.invoke(cli.app, ["pause", "websit", "--config", str(config)])
+
+    assert result.exit_code == 2
+    assert "«website»" in result.output
+    assert not (tmp_path / "np.db").exists()  # nothing was written for a typo

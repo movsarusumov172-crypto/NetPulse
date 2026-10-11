@@ -51,6 +51,10 @@ def _migration_3_degraded(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE results ADD COLUMN degraded INTEGER NOT NULL DEFAULT 0")
 
 
+def _migration_4_maintenance(conn: sqlite3.Connection) -> None:
+    conn.execute("CREATE TABLE paused_targets (target TEXT PRIMARY KEY, paused_at TEXT NOT NULL)")
+
+
 def _backfill_incidents(conn: sqlite3.Connection) -> None:
     """Rebuild past incidents from stored results so existing history shows up right away.
 
@@ -79,6 +83,7 @@ _MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _migration_1_results,
     _migration_2_incidents,
     _migration_3_degraded,
+    _migration_4_maintenance,
 )
 
 
@@ -240,6 +245,24 @@ class Storage:
         query += " ORDER BY started_at DESC, id DESC LIMIT ?"
         params.append(limit)
         return [_incident_from_row(row) for row in self._conn.execute(query, params)]
+
+    def pause(self, target: str, paused_at: datetime) -> bool:
+        """Put a target into maintenance. Returns False if it already was."""
+        with self._conn:
+            cursor = self._conn.execute(
+                "INSERT OR IGNORE INTO paused_targets (target, paused_at) VALUES (?, ?)",
+                (target, paused_at.isoformat()),
+            )
+        return cursor.rowcount > 0
+
+    def resume(self, target: str) -> bool:
+        """End a target's maintenance. Returns False if it was not paused."""
+        with self._conn:
+            cursor = self._conn.execute("DELETE FROM paused_targets WHERE target = ?", (target,))
+        return cursor.rowcount > 0
+
+    def paused_names(self) -> set[str]:
+        return {row["target"] for row in self._conn.execute("SELECT target FROM paused_targets")}
 
 
 def _incident_from_row(row: sqlite3.Row) -> Incident:

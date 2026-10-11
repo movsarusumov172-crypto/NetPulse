@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import difflib
 import logging
 import math
 import signal
@@ -14,7 +15,7 @@ import typer
 
 from netpulse.checks import run_check
 from netpulse.config import ConfigError, Settings, load_settings
-from netpulse.models import CheckResult, Uptime, target_from_string
+from netpulse.models import CheckResult, Target, Uptime, target_from_string
 from netpulse.monitor import run_monitor
 from netpulse.storage import Storage
 
@@ -43,12 +44,6 @@ def _percent(ratio: float | None) -> str:
         return "-"
     value = math.floor(ratio * 10_000) / 100
     return "100%" if value == 100 else f"{value:.2f}%"
-
-
-def _state_label(result: CheckResult) -> str:
-    if not result.ok:
-        return "DOWN"
-    return "DEGRADED" if result.degraded else "UP"
 
 
 def _format_result(result: CheckResult) -> str:
@@ -91,6 +86,16 @@ def check(
     raise typer.Exit(0 if result.ok else 1)
 
 
+def _state_label(result: CheckResult | None, paused: bool) -> str:
+    if paused:
+        return "PAUSED"
+    if result is None:
+        return "PENDING"
+    if not result.ok:
+        return "DOWN"
+    return "DEGRADED" if result.degraded else "UP"
+
+
 @app.command()
 def status(config: ConfigOption = Path("config.yaml")) -> None:
     """Show the latest result and 24h / 7d uptime of every configured target."""
@@ -100,32 +105,81 @@ def status(config: ConfigOption = Path("config.yaml")) -> None:
         raise typer.Exit(1)
 
     with Storage(settings.database) as storage:
-        results = storage.latest()
+        latest = {result.target: result for result in storage.latest()}
         uptime = storage.uptime(datetime.now(UTC))
+        paused_in_db = storage.paused_names()
 
-    configured = {target.name for target in settings.targets}
-    rows = [
-        (
-            result.target,
-            _state_label(result),
-            f"{result.latency_ms:.0f} ms" if result.latency_ms is not None else "-",
-            _percent(uptime.get(result.target, _NO_UPTIME).day),
-            _percent(uptime.get(result.target, _NO_UPTIME).week),
-            result.checked_at.strftime("%Y-%m-%d %H:%M:%S"),
-            result.error or "",
+    rows = []
+    for target in sorted(settings.targets, key=lambda item: item.name):
+        result = latest.get(target.name)
+        windows = uptime.get(target.name, _NO_UPTIME)
+        paused = target.paused or target.name in paused_in_db
+        rows.append(
+            (
+                target.name,
+                _state_label(result, paused),
+                f"{result.latency_ms:.0f} ms" if result and result.latency_ms is not None else "-",
+                _percent(windows.day),
+                _percent(windows.week),
+                result.checked_at.strftime("%Y-%m-%d %H:%M:%S") if result else "-",
+                (result.error or "") if result else "",
+            )
         )
-        for result in results
-        if result.target in configured
-    ]
-    if not rows:
-        typer.echo("No results yet.")
-        return
     header = ("TARGET", "STATE", "LATENCY", "UPTIME 24H", "UPTIME 7D", "CHECKED (UTC)", "ERROR")
     widths = [max(len(row[i]) for row in [header, *rows]) for i in range(len(header))]
     for row in [header, *rows]:
         typer.echo(
             "  ".join(cell.ljust(width) for cell, width in zip(row, widths, strict=True)).rstrip()
         )
+
+
+NameArgument = Annotated[str, typer.Argument(help="Target name as written in the config.")]
+
+
+def _find_target(settings: Settings, name: str) -> Target:
+    for target in settings.targets:
+        if target.name == name:
+            return target
+    known = [target.name for target in settings.targets]
+    hint = difflib.get_close_matches(name, known, n=1)
+    suggestion = f" Возможно, «{hint[0]}»?" if hint else ""
+    typer.echo(
+        f"Ошибка: цели «{name}» нет в конфиге.{suggestion} Есть: {', '.join(known)}", err=True
+    )
+    raise typer.Exit(2)
+
+
+@app.command()
+def pause(name: NameArgument, config: ConfigOption = Path("config.yaml")) -> None:
+    """Put a target into maintenance: no checks, no alerts, a grey card on the page."""
+    settings = _load(config)
+    target = _find_target(settings, name)
+    with Storage(settings.database) as storage:
+        newly_paused = storage.pause(target.name, datetime.now(UTC))
+    if newly_paused:
+        typer.echo(f"Цель «{name}» поставлена на обслуживание. Вернуть: netpulse resume {name}")
+    else:
+        typer.echo(f"Цель «{name}» уже на обслуживании.")
+
+
+@app.command()
+def resume(name: NameArgument, config: ConfigOption = Path("config.yaml")) -> None:
+    """Take a target out of maintenance (set by `netpulse pause`) and check it again."""
+    settings = _load(config)
+    target = _find_target(settings, name)
+    with Storage(settings.database) as storage:
+        was_paused = storage.resume(target.name)
+    if target.paused:
+        typer.echo(
+            f"Цель «{name}» остаётся на обслуживании: в конфиге у неё `paused: true`. "
+            "Уберите этот параметр, изменения подхватятся без перезапуска.",
+            err=True,
+        )
+        raise typer.Exit(1)
+    if was_paused:
+        typer.echo(f"Цель «{name}» снова проверяется.")
+    else:
+        typer.echo(f"Цель «{name}» не была на обслуживании.")
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from functools import partial
 
 import httpx
@@ -25,6 +25,7 @@ CheckFn = Callable[[Target], Awaitable[CheckResult]]
 SleepFn = Callable[[float], Awaitable[None]]
 
 _ALERT_TIMEOUT = 10.0
+PAUSE_POLL_SECONDS = 5.0  # how soon a pause/resume is noticed, whatever the check interval
 
 
 class Monitor:
@@ -38,6 +39,7 @@ class Monitor:
         notifier: Notifier | None = None,
         board: StatusBoard | None = None,
         sleep: SleepFn = asyncio.sleep,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._settings = settings
         self._check = check
@@ -46,6 +48,7 @@ class Monitor:
         self._notifier = notifier
         self._board = board
         self._sleep = sleep
+        self._clock = clock
         self._semaphore = asyncio.Semaphore(settings.concurrency)
         # Seed from the database so a restart does not re-alert about a target that is still down.
         self._tracker = StateTracker(storage.last_states(), storage.last_degraded())
@@ -56,11 +59,46 @@ class Monitor:
                 group.create_task(self._run_target(target))
 
     async def _run_target(self, target: Target) -> None:
+        paused = False
         while True:
+            if self._is_paused(target) != paused:
+                paused = not paused
+                self._on_pause_changed(target, paused)
+            if paused:
+                await self._sleep(PAUSE_POLL_SECONDS)
+                continue
             started = time.monotonic()
             await self.check_target(target)
             interval = self._settings.interval_for(target)
-            await self._sleep(max(0.0, interval - (time.monotonic() - started)))
+            await self._wait(max(0.0, interval - (time.monotonic() - started)), target)
+
+    def _is_paused(self, target: Target) -> bool:
+        """Paused by `paused: true` in the config or by `netpulse pause` (stored in the DB)."""
+        return target.paused or target.name in self._storage.paused_names()
+
+    async def _wait(self, seconds: float, target: Target) -> None:
+        """Sleep until the next check, in slices so a pause starts promptly."""
+        remaining = seconds
+        while remaining > 0:
+            step = min(remaining, PAUSE_POLL_SECONDS)
+            await self._sleep(step)
+            remaining -= step
+            if self._is_paused(target):
+                return
+
+    def _on_pause_changed(self, target: Target, paused: bool) -> None:
+        if paused:
+            # Maintenance is planned: end any open incident and forget the state, so the first
+            # check after resuming is judged afresh and nothing is alerted about the pause itself.
+            now = self._clock()
+            self._tracker.forget(target.name)
+            self._storage.close_incident(target.name, now)
+            self._metrics.forget(target.name)
+            logger.info("%s is in maintenance: checks and alerts are paused", target.name)
+        else:
+            logger.info("%s is out of maintenance: checks resume", target.name)
+        if self._board is not None:
+            self._board.set_paused(target.name, paused, self._clock())
 
     async def check_target(self, target: Target) -> CheckResult:
         """One full check cycle: attempts with retries, then persist, expose and alert."""

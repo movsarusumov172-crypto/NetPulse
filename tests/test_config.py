@@ -268,3 +268,16 @@ def test_missing_config_file_names_the_path(tmp_path: Path) -> None:
         load_settings(tmp_path / "nope.yaml")
 
     assert "nope.yaml" in str(error.value)
+
+
+def test_targets_can_be_paused_in_the_config(tmp_path: Path) -> None:
+    body = """
+targets:
+  - {name: live, type: dns, host: a.test}
+  - {name: maintenance, type: dns, host: b.test, paused: true}
+"""
+
+    live, maintenance = load_settings(write(tmp_path, body)).targets
+
+    assert live.paused is False
+    assert maintenance.paused is True

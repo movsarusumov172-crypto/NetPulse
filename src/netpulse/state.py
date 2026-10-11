@@ -43,6 +43,11 @@ class StateTracker:
         self._is_up: dict[str, bool] = dict(initial or {})
         self._degraded: set[str] = set(degraded)
 
+    def forget(self, target: str) -> None:
+        """Drop what is known about a target, e.g. when it goes into maintenance."""
+        self._is_up.pop(target, None)
+        self._degraded.discard(target)
+
     def update(self, result: CheckResult) -> Event | None:
         name = result.target
         previous = self._is_up.get(name)

@@ -32,6 +32,7 @@ class _TargetStatus:
     target: Target
     last: CheckResult | None = None
     since: datetime | None = None  # when the target entered its current state
+    paused: bool = False
     checks: int = 0
     successes: int = 0
     history: deque[CheckResult] = field(default_factory=lambda: deque(maxlen=HISTORY_SIZE))
@@ -60,6 +61,17 @@ class StatusBoard:
             status.successes += result.ok
             status.history.append(result)
 
+    def set_paused(self, name: str, paused: bool, at: datetime | None = None) -> None:
+        with self._lock:
+            status = self._statuses.get(name)
+            if status is None or status.paused == paused:
+                return
+            status.paused = paused
+            if paused:
+                status.since = at or datetime.now(UTC)
+            else:
+                status.since = status.last.checked_at if status.last else None
+
     def target_names(self) -> list[str]:
         with self._lock:
             return list(self._statuses)
@@ -77,7 +89,10 @@ class StatusBoard:
         }
 
 
-def _state(last: CheckResult | None) -> str:
+def _state(status: _TargetStatus) -> str:
+    last = status.last
+    if status.paused:
+        return "paused"
     if last is None:
         return "pending"
     if not last.ok:
@@ -89,7 +104,7 @@ def _describe(
     status: _TargetStatus, default_interval: float, default_degraded_ms: float | None
 ) -> dict[str, Any]:
     last = status.last
-    state = _state(last)
+    state = _state(status)
     degraded_ms = status.target.degraded_ms
     return {
         "name": status.target.name,

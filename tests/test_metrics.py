@@ -41,3 +41,19 @@ def test_degraded_target_is_up_but_flagged() -> None:
     metrics.record(CheckResult("web", ok=True, latency_ms=50.0))
 
     assert sample(metrics, "netpulse_degraded", target="web") == 0
+
+
+def test_forget_removes_every_series_of_the_target() -> None:
+    metrics = Metrics()
+    metrics.record(CheckResult("web", ok=True, latency_ms=10.0, ssl_days_left=30))
+    metrics.record(CheckResult("db", ok=True, latency_ms=10.0))
+
+    metrics.forget("web")
+    metrics.forget("web")  # twice is fine
+    metrics.forget("unknown")
+
+    for name in ("netpulse_up", "netpulse_degraded", "netpulse_latency_seconds"):
+        assert sample(metrics, name, target="web") is None
+    assert sample(metrics, "netpulse_ssl_expiry_days", target="web") is None
+    assert sample(metrics, "netpulse_checks_total", target="web", result="ok") is None
+    assert sample(metrics, "netpulse_up", target="db") == 1  # others untouched

@@ -1,10 +1,13 @@
 import asyncio
-from collections.abc import Iterator
+import contextlib
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 
 from netpulse.config import Settings
+from netpulse.dashboard import StatusBoard
 from netpulse.metrics import Metrics
 from netpulse.models import CheckResult, DnsTarget, Target
 from netpulse.monitor import CheckFn, Monitor
@@ -302,3 +305,142 @@ async def test_each_target_is_checked_on_its_own_interval(storage: Storage) -> N
         await monitor._run_target(fast)
 
     assert sleeps == [pytest.approx(5, abs=1), pytest.approx(5, abs=1)]
+
+
+def snapshot_of(board: StatusBoard) -> dict[str, Any]:
+    [target] = board.snapshot()["targets"]
+    return target  # type: ignore[no-any-return]
+
+
+class _StopLoop(Exception):
+    pass
+
+
+async def run_loop(
+    monitor: Monitor,
+    target: DnsTarget,
+    *,
+    steps: int,
+    on_sleep: Callable[[int], None] = lambda n: None,
+) -> None:
+    """Run the target's loop with instant sleeps; `on_sleep(n)` fires at the n-th sleep."""
+    calls = 0
+
+    async def fake_sleep(delay: float) -> None:
+        nonlocal calls
+        calls += 1
+        on_sleep(calls)
+        if calls >= steps:
+            raise _StopLoop
+
+    monitor._sleep = fake_sleep
+    with contextlib.suppress(_StopLoop):
+        await monitor._run_target(target)
+
+
+def loop_monitor(
+    storage: Storage,
+    check: CheckFn,
+    notifier: FakeNotifier,
+    target: DnsTarget,
+    *,
+    board: StatusBoard | None = None,
+    metrics: Metrics | None = None,
+) -> Monitor:
+    settings = Settings(targets=[target], retries=0, interval=30)
+    return Monitor(
+        settings,
+        check=check,
+        storage=storage,
+        metrics=metrics or Metrics(),
+        notifier=notifier,
+        board=board,
+        sleep=no_sleep,
+        clock=lambda: T0 + timedelta(hours=1),
+    )
+
+
+async def test_pausing_stops_checks_and_alerts_and_closes_the_open_incident(
+    storage: Storage,
+) -> None:
+    notifier = FakeNotifier()
+    check = ScriptedCheck(False)
+    monitor = loop_monitor(storage, check, notifier, TARGET)
+
+    await run_loop(
+        monitor,
+        TARGET,
+        steps=12,
+        on_sleep=lambda n: storage.pause("svc", T0) if n == 2 else None,
+    )
+
+    assert check.attempts == 1  # the one check before the pause, nothing after it
+    assert len(notifier.messages) == 1  # the DOWN alert; the pause itself alerts nobody
+    [incident] = storage.incidents()
+    assert incident.ended_at == T0 + timedelta(hours=1)
+
+
+async def test_a_target_paused_in_the_config_is_never_checked(storage: Storage) -> None:
+    target = DnsTarget(name="svc", host="svc.test", paused=True)
+    check = ScriptedCheck(False)
+    board = StatusBoard([target], interval=30)
+    monitor = loop_monitor(storage, check, FakeNotifier(), target, board=board)
+
+    await run_loop(monitor, target, steps=5)
+
+    assert check.attempts == 0
+    assert snapshot_of(board)["state"] == "paused"
+
+
+async def test_resuming_judges_the_target_afresh(storage: Storage) -> None:
+    notifier = FakeNotifier()
+    monitor = loop_monitor(storage, ScriptedCheck(False), notifier, TARGET)
+
+    def toggle(n: int) -> None:
+        if n == 2:
+            storage.pause("svc", T0)
+        elif n == 6:
+            storage.resume("svc")
+
+    await run_loop(monitor, TARGET, steps=9, on_sleep=toggle)
+
+    # Still down after maintenance: a new DOWN alert and a new incident, not a silent continuation.
+    assert len(notifier.messages) == 2
+    assert [i.ended_at is None for i in storage.incidents()] == [True, False]
+
+
+async def test_coming_back_up_after_maintenance_sends_no_recovery_alert(storage: Storage) -> None:
+    notifier = FakeNotifier()
+    monitor = loop_monitor(storage, ScriptedCheck(False, True), notifier, TARGET)
+
+    def toggle(n: int) -> None:
+        if n == 2:
+            storage.pause("svc", T0)
+        elif n == 6:
+            storage.resume("svc")
+
+    await run_loop(monitor, TARGET, steps=9, on_sleep=toggle)
+
+    assert len(notifier.messages) == 1  # only the original DOWN
+
+
+async def test_a_paused_target_leaves_no_stale_metrics_and_shows_as_paused(
+    storage: Storage,
+) -> None:
+    metrics = Metrics()
+    board = StatusBoard([TARGET], interval=30)
+    monitor = loop_monitor(
+        storage, ScriptedCheck(True), FakeNotifier(), TARGET, board=board, metrics=metrics
+    )
+
+    await run_loop(
+        monitor,
+        TARGET,
+        steps=6,
+        on_sleep=lambda n: storage.pause("svc", T0) if n == 2 else None,
+    )
+
+    assert metrics.registry.get_sample_value("netpulse_up", {"target": "svc"}) is None
+    snapshot = snapshot_of(board)
+    assert snapshot["state"] == "paused"
+    assert snapshot["since"] == (T0 + timedelta(hours=1)).isoformat()

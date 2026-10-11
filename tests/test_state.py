@@ -107,3 +107,14 @@ def test_restored_degraded_state_does_not_realert(up: CheckResult) -> None:
 
     assert tracker.update(slow()) is None
     assert tracker.update(up) is Event.NORMALIZED
+
+
+def test_forgotten_target_is_judged_afresh(up: CheckResult, down: CheckResult) -> None:
+    tracker = StateTracker({"svc": False}, degraded={"svc"})
+
+    tracker.forget("svc")
+
+    assert tracker.update(down) is Event.WENT_DOWN  # not "already down"
+    tracker.forget("svc")
+    assert tracker.update(up) is None  # not a recovery
+    tracker.forget("never-seen")  # harmless

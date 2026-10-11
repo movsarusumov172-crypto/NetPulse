@@ -56,6 +56,15 @@ class Metrics:
         self._set_or_clear(self._latency, target, _seconds(result.latency_ms))
         self._set_or_clear(self._ssl_days, target, result.ssl_days_left)
 
+    def forget(self, target: str) -> None:
+        """Remove every series of a target, so a paused or removed one is not left stale."""
+        for gauge in (self._up, self._degraded, self._latency, self._ssl_days):
+            with suppress(KeyError):
+                gauge.remove(target)
+        for result in ("ok", "fail"):
+            with suppress(KeyError):
+                self._checks.remove(target, result)
+
     @staticmethod
     def _set_or_clear(gauge: Gauge, target: str, value: float | None) -> None:
         if value is not None:

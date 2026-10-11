@@ -264,3 +264,18 @@ def test_each_card_reports_its_own_check_interval() -> None:
 
     assert targets["web"]["interval"] == 30
     assert targets["custom"]["interval"] == 5
+
+
+def test_paused_state_wins_over_the_last_result_and_is_reversible() -> None:
+    board = StatusBoard([WEB], interval=30)
+    board.record(at(0, ok=False))
+
+    board.set_paused("web", True, T0 + timedelta(minutes=5))
+    paused = by_name(board)["web"]
+    board.set_paused("web", False)
+    resumed = by_name(board)["web"]
+
+    assert paused["state"] == "paused"
+    assert paused["since"] == (T0 + timedelta(minutes=5)).isoformat()
+    assert resumed["state"] == "down"  # back to what the last check said
+    board.set_paused("unknown", True)  # no error for a target that was removed meanwhile
